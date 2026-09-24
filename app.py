@@ -902,8 +902,9 @@ def page_dashboard() -> None:
     render_daily_software_table(display)
     st.caption("DAUTO Serviços (conta 98530-8) permanece incorporada à ÉTICA Itaú, conforme a regra do sistema.")
 
-    # Monthly summary uses actual recorded business days; missing dates are not carried forward.
-    all_period = history[(history["DATA_DT"].dt.date >= start_date) & (history["DATA_DT"].dt.date <= end_date)].copy()
+    # Consolidado mensal é independente do filtro da tabela diária.
+    # Ele usa todo o histórico disponível no banco, mantendo-se sempre visível.
+    all_period = history.copy()
     actual_daily = all_period.groupby("DATA_DT", as_index=False)["SALDO"].sum().sort_values("DATA_DT")
     actual_daily["ANO"] = actual_daily["DATA_DT"].dt.year; actual_daily["MES"] = actual_daily["DATA_DT"].dt.month
     names={1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"}
@@ -913,7 +914,7 @@ def page_dashboard() -> None:
         rows.append({"Mês":f"{names[int(month)]}/{int(year)}","Saldo inicial":initial,"Saldo final":final,"Variação":variation,"% Variação":(variation/initial*100) if initial else None,"Saldo médio":float(grp["SALDO"].mean())})
     monthly=pd.DataFrame(rows)
     if monthly.empty:
-        st.info("Não há lançamentos para consolidar no período selecionado.")
+        st.info("Ainda não há lançamentos históricos para montar o consolidado mensal.")
     else:
         render_monthly_software_table(monthly)
 
@@ -940,12 +941,12 @@ def main() -> None:
     inject_css()
     with st.sidebar:
         st.markdown(f'<div class="sidebar-brand"><div class="brand-circles"><img class="sidebar-logo-img" src="{LOGO_UNICA}"><img class="sidebar-logo-img" src="{LOGO_DAUTO}"></div><div class="brand-title">Grupo Dauto Tintas</div><div class="brand-subtitle">Controle diário de saldos</div></div>', unsafe_allow_html=True)
-        page = st.radio("Navegação", ["🏠  Visão Geral", "📷  Atualizar Saldos", "────────────", "☁️  Importar Histórico", "🏦  Contas"], label_visibility="collapsed")
+        page = st.radio("Navegação", ["Visão Geral", "Atualizar Saldos", "────────────", "Importar Histórico", "Contas"], label_visibility="collapsed")
         st.divider(); st.caption("Dados armazenados no Google Sheets")
-    if page == "🏠  Visão Geral": page_dashboard()
-    elif page == "📷  Atualizar Saldos": page_update()
-    elif page == "☁️  Importar Histórico": page_history_import()
-    elif page == "🏦  Contas": page_accounts()
+    if page == "Visão Geral": page_dashboard()
+    elif page == "Atualizar Saldos": page_update()
+    elif page == "Importar Histórico": page_history_import()
+    elif page == "Contas": page_accounts()
     else:
         st.session_state["noop"] = True
         st.info("Selecione uma opção do menu.")
