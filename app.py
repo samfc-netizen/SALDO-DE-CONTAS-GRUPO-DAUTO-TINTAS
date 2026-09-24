@@ -224,10 +224,24 @@ def preprocess_image(raw: bytes | Image.Image) -> Image.Image:
     return image.filter(ImageFilter.SHARPEN)
 
 
-def ocr_image(image: Image.Image, psm: int = 6) -> str:
+def preprocess_crop(image: Image.Image, box: tuple[int, int, int, int], invert: bool = False) -> Image.Image:
+    """Prepare a small screen region without losing the tiny header characters."""
+    crop = ImageOps.exif_transpose(image).convert("L").crop(box)
+    scale = max(3.0, 2200 / max(crop.width, 1))
+    crop = crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.Resampling.LANCZOS)
+    crop = ImageOps.autocontrast(crop, cutoff=1)
+    crop = ImageEnhance.Contrast(crop).enhance(1.7)
+    if invert:
+        crop = ImageOps.invert(crop)
+    return crop.filter(ImageFilter.SHARPEN)
+
+
+def ocr_image(image: Image.Image, psm: int = 6, whitelist: str | None = None) -> str:
     try:
         import pytesseract
         config = f"--oem 3 --psm {psm}"
+        if whitelist:
+            config += f" -c tessedit_char_whitelist={whitelist}"
         try:
             return pytesseract.image_to_string(image, lang="por+eng", config=config)
         except pytesseract.TesseractError:
@@ -255,36 +269,91 @@ def known_match(found: str, accounts: pd.DataFrame, bank: str) -> dict[str, Any]
 MONEY_PATTERN = r"(?:R\$\s*)?[-(]?\d{1,3}(?:\.\d{3})*,\d{2}[)-]?"
 
 
+def match_bb_account(texts: list[str], accounts: pd.DataFrame) -> tuple[dict[str, Any] | None, bool]:
+    """Match the header against the five known accounts, tolerating OCR substitutions."""
+    subset = accounts[accounts["BANCO"].map(plain).str.contains("BANCO DO BRASIL", regex=False)]
+    rows = subset.to_dict("records")
+    translation = str.maketrans({"O": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2"})
+
+    compact_texts = [key_part(plain(text)).translate(translation) for text in texts if text]
+    for compact in compact_texts:
+        for row in rows:
+            expected = key_part(row["CONTA"]).translate(translation)
+            if expected in compact:
+                return row, True
+
+    best_score = 0.0
+    best_row = None
+    for compact in compact_texts:
+        for row in rows:
+            expected = key_part(row["CONTA"]).translate(translation)
+            size = len(expected)
+            for width in (size - 1, size, size + 1):
+                if width < 4:
+                    continue
+                for start in range(max(1, len(compact) - width + 1)):
+                    score = SequenceMatcher(None, compact[start:start + width], expected).ratio()
+                    if score > best_score:
+                        best_score, best_row = score, row
+    return (best_row, False) if best_score >= 0.80 else (None, False)
+
+
+def final_bb_balance(texts: list[str]) -> float | None:
+    # First choice: the final line explicitly labelled "Saldo".
+    labelled: list[float] = []
+    for text in texts:
+        for line in text.splitlines():
+            line_plain = plain(line).strip()
+            if re.match(r"^SALD[O0]\b", line_plain) and "999" not in line_plain:
+                values = re.findall(MONEY_PATTERN, line, flags=re.I)
+                if values:
+                    value = parse_brl(values[-1])
+                    if value is not None:
+                        labelled.append(value)
+    if labelled:
+        return labelled[-1]
+
+    # In these BB screenshots the final balance is the last monetary value in the footer.
+    # This fallback only receives footer OCR, so it cannot pick a transaction from the top.
+    for text in texts:
+        values = re.findall(MONEY_PATTERN, text, flags=re.I)
+        if values:
+            value = parse_brl(values[-1])
+            if value is not None:
+                return value
+    return None
+
+
 def extract_bb(raw: bytes, filename: str, accounts: pd.DataFrame) -> list[dict[str, Any]]:
-    text = ocr_image(preprocess_image(raw), psm=6)
-    normalized = plain(text)
-    candidates = re.findall(r"\b\d{2,3}[.\s-]?\d{3}[\s-]?[0-9X]\b", normalized)
-    # The known account list protects against OCR punctuation and one-character mistakes.
-    found_account = None
-    account = None
-    for candidate in candidates:
-        match = known_match(candidate, accounts, "BANCO DO BRASIL")
-        if match:
-            found_account, account = candidate, match
-            if key_part(candidate) == key_part(match["CONTA"]):
-                break
+    original = ImageOps.exif_transpose(Image.open(io.BytesIO(raw))).convert("RGB")
+    width, height = original.size
+
+    # The account is in the blue header. Upscaling and inverting that region gives
+    # Tesseract dark characters on a light background instead of a complex full screen.
+    header_box = (int(width * 0.50), 0, width, min(height, max(80, int(height * 0.23))))
+    header = preprocess_crop(original, header_box, invert=True)
+    header_texts = [ocr_image(header, psm=6), ocr_image(header, psm=11)]
+    account, exact = match_bb_account(header_texts, accounts)
+
+    full_text = ""
+    if not account:
+        full_text = ocr_image(preprocess_image(original), psm=11)
+        account, exact = match_bb_account(header_texts + [full_text], accounts)
     if not account:
         return [result_row(filename=filename, bank="Banco do Brasil", status="Conta não identificada", confidence="Baixa")]
 
-    saldo = None
-    # Deliberately ignore "999 SALDO" and take the last standalone final "Saldo" line.
-    saldo_lines = []
-    for line in text.splitlines():
-        line_plain = plain(line).strip()
-        if re.match(r"^SALDO\b", line_plain) and "999" not in line_plain:
-            values = re.findall(MONEY_PATTERN, line, flags=re.I)
-            if values:
-                saldo_lines.append(values[-1])
-    if saldo_lines:
-        saldo = parse_brl(saldo_lines[-1])
+    # Read only the lower part for the final balance. Two layout modes handle both
+    # the aligned table and sparse footer text used by the Banco do Brasil page.
+    footer_box = (0, int(height * 0.52), width, height)
+    footer = preprocess_crop(original, footer_box)
+    footer_texts = [ocr_image(footer, psm=6), ocr_image(footer, psm=11)]
+    saldo = final_bb_balance(footer_texts)
+    if saldo is None:
+        if not full_text:
+            full_text = ocr_image(preprocess_image(original), psm=6)
+        saldo = final_bb_balance([full_text])
     if saldo is None:
         return [result_row(account, filename, "Banco do Brasil", status="Saldo não localizado", confidence="Média")]
-    exact = key_part(found_account) == key_part(account["CONTA"])
     return [result_row(account, filename, "Banco do Brasil", saldo, "Leitura concluída", "Alta" if exact else "Média")]
 
 
