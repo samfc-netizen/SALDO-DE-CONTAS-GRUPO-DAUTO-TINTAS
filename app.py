@@ -138,8 +138,12 @@ def account_group(alias: str, bank: str) -> str:
     return alias
 
 
-def company_group(alias: str, company: str) -> str:
+def company_group(alias: str, company: str, account: str = "") -> str:
     """Stable business label used to consolidate multiple accounts at the same bank."""
+    # Business rule from the historical control: DAUTO Serviços 98530-8 is
+    # presented inside the ÉTICA Itaú group.
+    if key_part(account) == "985308":
+        return "ÉTICA"
     source = plain(alias or company)
     mappings = [
         ("DT ", "DT TINTAS"),
@@ -158,6 +162,73 @@ def company_group(alias: str, company: str) -> str:
 
 def bank_group(bank: str) -> str:
     return "Banco do Brasil" if "BRASIL" in plain(bank) else "Itaú" if "ITAU" in plain(bank) else bank
+
+
+LEGACY_COLUMNS = {
+    2: ("ÚNICA", "Itaú", "73733-7"),
+    3: ("ÚNICA", "Banco do Brasil", "62.608-2"),
+    4: ("MERCADO", "Itaú", "HIST-MERCADO-ITAU"),
+    5: ("MERCADO", "Banco do Brasil", "33.300-X"),
+    6: ("V&T", "Itaú", "HIST-VET-ITAU"),
+    7: ("V&T", "Banco do Brasil", "62.619-8"),
+    8: ("ÉTICA", "Itaú", "HIST-ETICA-ITAU"),
+    9: ("ÉTICA", "Banco do Brasil", "62.686-4"),
+    10: ("DT TINTAS", "Itaú", "HIST-DT-ITAU"),
+    11: ("DT TINTAS", "Banco do Brasil", "62.810-7"),
+}
+
+
+def legacy_month(sheet_name: str) -> int | None:
+    normalized = plain(sheet_name)
+    prefixes = {"JAN": 1, "FEV": 2, "MAR": 3, "ABR": 4, "MAI": 5, "JUN": 6,
+                "JUL": 7, "AGO": 8, "SET": 9, "OUT": 10, "NOV": 11, "DEZ": 12}
+    return next((month for prefix, month in prefixes.items() if normalized.startswith(prefix)), None)
+
+
+def parse_legacy_workbook(raw: bytes, filename: str, year: int) -> pd.DataFrame:
+    """Convert the old monthly matrix to the app's normalized balance rows."""
+    try:
+        import openpyxl
+        workbook = openpyxl.load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
+    except Exception as exc:
+        raise RuntimeError("Não foi possível abrir a planilha histórica.") from exc
+
+    rows: list[dict[str, Any]] = []
+    for sheet in workbook.worksheets:
+        month = legacy_month(sheet.title)
+        if month is None:
+            continue
+        for row_number in range(4, min(sheet.max_row or 40, 40) + 1):
+            raw_day = sheet.cell(row_number, 1).value
+            if isinstance(raw_day, (datetime, date)):
+                day_number = raw_day.day
+            else:
+                match = re.match(r"\s*(\d{1,2})(?:\D|$)", str(raw_day or ""))
+                day_number = int(match.group(1)) if match else 0
+            if not 1 <= day_number <= 31:
+                continue
+            try:
+                position = date(year, month, day_number)
+            except ValueError:
+                continue
+            for column, (company, bank, account) in LEGACY_COLUMNS.items():
+                balance = parse_brl(sheet.cell(row_number, column).value)
+                if balance is None:
+                    continue
+                rows.append({
+                    "Salvar": True,
+                    "Data": position,
+                    "Empresa": company,
+                    "Banco": bank,
+                    "Agência": "1231-9" if bank == "Banco do Brasil" else "",
+                    "Conta": account,
+                    "Saldo identificado": br_number(balance),
+                    "Status": "Histórico pronto para importar",
+                    "Arquivo": filename,
+                    "Confiança": "Histórico",
+                    "Origem": "Importação histórica XLSX",
+                })
+    return pd.DataFrame(rows)
 
 
 @st.cache_resource(show_spinner=False)
@@ -495,21 +566,30 @@ def process_file(uploaded, accounts: pd.DataFrame) -> list[dict[str, Any]]:
         return [result_row(filename=name, status=f"Não foi possível identificar o saldo deste arquivo. ({exc})")]
 
 
-def save_balances(rows: pd.DataFrame, position_date: date) -> tuple[int, int]:
+def save_balances(rows: pd.DataFrame, position_date: date | None = None) -> tuple[int, int]:
     _, ws = ensure_database()
     values = ws.get_all_values()
-    date_text = position_date.strftime("%d/%m/%Y")
     index: dict[tuple[str, str, str], int] = {}
     for sheet_row, row in enumerate(values[1:], start=2):
         padded = row + [""] * (len(SALDOS_HEADERS) - len(row))
         record = dict(zip(SALDOS_HEADERS, padded))
         index[(record["DATA"], key_part(record["BANCO"]), key_part(record["CONTA"]))] = sheet_row
 
-    inserted = updated = 0
+    updates: list[dict[str, Any]] = []
+    appends: list[list[Any]] = []
     for _, row in rows.iterrows():
         balance = parse_brl(row["Saldo identificado"])
         if not bool(row["Salvar"]) or balance is None or not str(row["Conta"]).strip():
             continue
+        row_date = position_date if position_date is not None else row.get("Data")
+        if isinstance(row_date, datetime):
+            row_date = row_date.date()
+        if not isinstance(row_date, date):
+            parsed_date = pd.to_datetime(row_date, dayfirst=True, errors="coerce")
+            if pd.isna(parsed_date):
+                continue
+            row_date = parsed_date.date()
+        date_text = row_date.strftime("%d/%m/%Y")
         balance_cents = int(round(balance * 100))
         key = (date_text, key_part(row["Banco"]), key_part(row["Conta"]))
         stable_id = hashlib.sha1("|".join(key).encode("utf-8")).hexdigest()[:16]
@@ -520,16 +600,19 @@ def save_balances(rows: pd.DataFrame, position_date: date) -> tuple[int, int]:
         ]
         if key in index:
             sheet_row = index[key]
-            # RAW preserves the JSON numeric value. USER_ENTERED can interpret the decimal
-            # point as a thousands separator when the spreadsheet locale is pt-BR.
-            ws.update(range_name=f"A{sheet_row}:K{sheet_row}", values=[payload], value_input_option="RAW")
-            updated += 1
+            updates.append({"range": f"A{sheet_row}:K{sheet_row}", "values": [payload]})
         else:
-            ws.append_row(payload, value_input_option="RAW")
-            inserted += 1
+            appends.append(payload)
+            index[key] = len(values) + len(appends)
+    # RAW preserves integer cents regardless of the spreadsheet locale. Batching is
+    # essential for historical imports so hundreds of rows use only two API calls.
+    if updates:
+        ws.batch_update(updates, value_input_option="RAW")
+    if appends:
+        ws.append_rows(appends, value_input_option="RAW")
     st.session_state["db_refresh"] = st.session_state.get("db_refresh", 0) + 1
     load_database.clear()
-    return inserted, updated
+    return len(appends), len(updates)
 
 
 def page_update() -> None:
@@ -598,6 +681,53 @@ def page_update() -> None:
                 st.error(str(exc))
 
 
+def page_history_import() -> None:
+    hero("Importar histórico", "Traga a planilha mensal antiga para o mesmo histórico usado pelo painel.")
+    st.info(
+        "As colunas consolidadas do Itaú serão preservadas como grupos históricos. "
+        "Os valores não serão distribuídos artificialmente entre contas individuais."
+    )
+    left, right = st.columns([1, 2])
+    with left:
+        history_year = st.number_input("Ano da planilha", min_value=2020, max_value=2100, value=2026, step=1)
+    with right:
+        workbook_file = st.file_uploader("Planilha histórica (.xlsx)", type=["xlsx"], key="history_workbook")
+
+    if st.button("Analisar planilha", type="primary", disabled=workbook_file is None, use_container_width=True):
+        try:
+            with st.spinner("Lendo meses e consolidando o histórico…"):
+                history = parse_legacy_workbook(workbook_file.getvalue(), workbook_file.name, int(history_year))
+            if history.empty:
+                st.warning("Nenhum saldo diário foi encontrado no formato esperado.")
+                st.session_state.pop("history_rows", None)
+            else:
+                st.session_state["history_rows"] = history
+        except Exception as exc:
+            st.error(str(exc))
+
+    history = st.session_state.get("history_rows")
+    if history is None or history.empty:
+        return
+    st.subheader("Prévia da importação")
+    summary = (
+        history.assign(Mês=history["Data"].map(lambda value: value.strftime("%m/%Y")))
+        .groupby("Mês", as_index=False)
+        .agg(Dias=("Data", "nunique"), Registros=("Conta", "size"))
+    )
+    st.dataframe(summary, hide_index=True, use_container_width=True)
+    preview = history[["Data", "Empresa", "Banco", "Conta", "Saldo identificado"]].copy()
+    preview["Data"] = preview["Data"].map(lambda value: value.strftime("%d/%m/%Y"))
+    st.dataframe(preview, hide_index=True, use_container_width=True, height=360)
+    st.caption(f"{len(history)} registros encontrados. Registros já existentes serão atualizados pela chave data + banco + conta.")
+    if st.button("Importar histórico para o Google Sheets", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Gravando histórico em lote…"):
+                inserted, updated = save_balances(history, position_date=None)
+            st.success(f"Histórico importado: {inserted} novo(s) registro(s) e {updated} atualizado(s).")
+        except Exception as exc:
+            st.error(str(exc))
+
+
 def password_gate() -> bool:
     if st.session_state.get("dashboard_unlocked"):
         return True
@@ -639,7 +769,7 @@ def page_dashboard() -> None:
     day = day.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
     day["APELIDO"] = day["APELIDO"].fillna(day["CONTA"])
     day["EMPRESA_GRUPO"] = day.apply(
-        lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"])), axis=1
+        lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"]), str(r["CONTA"])), axis=1
     )
     day["BANCO_GRUPO"] = day["BANCO"].map(bank_group)
     st.metric("Saldo consolidado", brl(day["SALDO"].sum()))
@@ -662,6 +792,19 @@ def page_dashboard() -> None:
             )
 
     st.subheader("Saldos por empresa e banco")
+    matrix = grouped.pivot(index="EMPRESA_GRUPO", columns="BANCO_GRUPO", values="SALDO").fillna(0)
+    matrix = matrix.reindex(columns=[column for column in ["Itaú", "Banco do Brasil"] if column in matrix.columns])
+    matrix["Consolidado"] = matrix.sum(axis=1)
+    matrix.index.name = "Empresa"
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+        column_config={
+            column: st.column_config.NumberColumn(format="R$ %.2f") for column in matrix.columns
+        },
+    )
+
+    st.subheader("Contas que compõem os saldos")
     consolidated = grouped.rename(
         columns={
             "EMPRESA_GRUPO": "Empresa",
@@ -722,11 +865,17 @@ def main() -> None:
     with st.sidebar:
         st.markdown("## Dauto Financeiro")
         st.caption("Controle diário de saldos")
-        page = st.radio("Navegação", ["Atualizar Saldos", "Visão Geral", "Contas"], label_visibility="collapsed")
+        page = st.radio(
+            "Navegação",
+            ["Atualizar Saldos", "Importar Histórico", "Visão Geral", "Contas"],
+            label_visibility="collapsed",
+        )
         st.divider()
         st.caption("Dados armazenados no Google Sheets")
     if page == "Atualizar Saldos":
         page_update()
+    elif page == "Importar Histórico":
+        page_history_import()
     elif page == "Visão Geral":
         page_dashboard()
     else:
