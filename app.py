@@ -749,7 +749,7 @@ def password_gate() -> bool:
 
 
 def page_dashboard() -> None:
-    hero("Visão geral", "Saldos consolidados, composição por conta e evolução diária do grupo.")
+    hero("Visão geral", "Acompanhe os saldos por banco, empresa e o resumo mensal.")
     if not password_gate():
         return
     try:
@@ -760,92 +760,103 @@ def page_dashboard() -> None:
     if saldos.empty or saldos["DATA_DT"].dropna().empty:
         st.info("Ainda não há saldos gravados para exibir.")
         return
-    available = sorted(saldos["DATA_DT"].dropna().dt.date.unique(), reverse=True)
-    selected_date = st.selectbox("Data da posição", available, format_func=lambda d: d.strftime("%d/%m/%Y"))
-    day = saldos[saldos["DATA_DT"].dt.date == selected_date].copy()
+
+    history = saldos.dropna(subset=["DATA_DT", "SALDO"]).copy()
     aliases = contas[["BANCO", "CONTA", "APELIDO", "ORDEM"]].copy()
     aliases["K"] = aliases["BANCO"].map(key_part) + "|" + aliases["CONTA"].map(key_part)
-    day["K"] = day["BANCO"].map(key_part) + "|" + day["CONTA"].map(key_part)
-    day = day.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
-    day["APELIDO"] = day["APELIDO"].fillna(day["CONTA"])
-    day["EMPRESA_GRUPO"] = day.apply(
+    history["K"] = history["BANCO"].map(key_part) + "|" + history["CONTA"].map(key_part)
+    history = history.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
+    history["APELIDO"] = history["APELIDO"].fillna(history["CONTA"])
+    history["EMPRESA_GRUPO"] = history.apply(
         lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"]), str(r["CONTA"])), axis=1
     )
-    day["BANCO_GRUPO"] = day["BANCO"].map(bank_group)
-    st.metric("Saldo consolidado", brl(day["SALDO"].sum()))
+    history["BANCO_GRUPO"] = history["BANCO"].map(bank_group)
 
-    grouped = (
-        day.groupby(["EMPRESA_GRUPO", "BANCO_GRUPO"], as_index=False)
-        .agg(
-            CONTAS=("CONTA", lambda values: " • ".join(sorted({str(value) for value in values}))),
-            SALDO=("SALDO", "sum"),
-        )
-        .sort_values(["EMPRESA_GRUPO", "BANCO_GRUPO"])
+    min_date = history["DATA_DT"].min().date()
+    max_date = history["DATA_DT"].max().date()
+    f1, f2 = st.columns(2)
+    with f1:
+        start_date = st.date_input("Data inicial", value=min_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+    with f2:
+        end_date = st.date_input("Data final", value=max_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+    if start_date > end_date:
+        st.error("A data inicial não pode ser maior que a data final.")
+        return
+
+    period = history[(history["DATA_DT"].dt.date >= start_date) & (history["DATA_DT"].dt.date <= end_date)].copy()
+    if period.empty:
+        st.warning("Não há saldos no período selecionado.")
+        return
+
+    # O total de cada dia usa somente as posições efetivamente gravadas naquela data.
+    # As regras de consolidação de empresa são as mesmas já usadas pelo aplicativo.
+    period["COLUNA"] = period.apply(
+        lambda r: f'{r["EMPRESA_GRUPO"]} ITAÚ' if r["BANCO_GRUPO"] == "Itaú" else r["EMPRESA_GRUPO"], axis=1
     )
-    cols = st.columns(3)
-    for idx, row in grouped.reset_index(drop=True).iterrows():
-        with cols[idx % 3]:
-            st.markdown(
-                f'<div class="metric-card"><div class="label">{row["EMPRESA_GRUPO"]} • {row["BANCO_GRUPO"]}</div>'
-                f'<div class="value">{brl(row["SALDO"])}</div></div>',
-                unsafe_allow_html=True,
-            )
+    column_order = [
+        "ÚNICA ITAÚ", "ÚNICA", "MERCADO ITAÚ", "MERCADO", "V&T ITAÚ", "V&T",
+        "ÉTICA ITAÚ", "ÉTICA", "DT TINTAS ITAÚ", "DT TINTAS", "DAUTO ITAÚ", "DAUTO"
+    ]
+    present = [c for c in column_order if c in set(period["COLUNA"])]
+    extras = [c for c in period["COLUNA"].dropna().unique() if c not in present]
+    present += sorted(extras)
 
-    st.subheader("Saldos por empresa e banco")
-    matrix = grouped.pivot(index="EMPRESA_GRUPO", columns="BANCO_GRUPO", values="SALDO").fillna(0)
-    matrix = matrix.reindex(columns=[column for column in ["Itaú", "Banco do Brasil"] if column in matrix.columns])
-    matrix["Consolidado"] = matrix.sum(axis=1)
-    matrix.index.name = "Empresa"
+    daily_matrix = period.pivot_table(index="DATA_DT", columns="COLUNA", values="SALDO", aggfunc="sum")
+    daily_matrix = daily_matrix.reindex(columns=present).sort_index()
+    daily_matrix["SALDO TOTAL"] = daily_matrix.sum(axis=1, min_count=1)
+
+    latest_total = daily_matrix["SALDO TOTAL"].dropna().iloc[-1]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Empresas", period["EMPRESA_GRUPO"].nunique())
+    c2.metric("Bancos", period["BANCO_GRUPO"].nunique())
+    c3.metric("Contas ativas no período", period["CONTA"].nunique())
+    c4.metric("Saldo na última posição", brl(latest_total))
+
+    st.subheader("Saldos por banco e empresa")
+    display = daily_matrix.copy()
+    display.index = display.index.strftime("%d/%m/%Y")
+    display.index.name = "Data"
     st.dataframe(
-        matrix,
+        display.style.format(lambda x: brl(x) if pd.notna(x) else "—"),
         use_container_width=True,
-        column_config={
-            column: st.column_config.NumberColumn(format="R$ %.2f") for column in matrix.columns
-        },
+        height=min(620, 88 + 35 * len(display)),
     )
+    st.caption("DAUTO Serviços (conta 98530-8) permanece incorporada à ÉTICA Itaú, conforme a regra existente no sistema.")
 
-    st.subheader("Contas que compõem os saldos")
-    consolidated = grouped.rename(
-        columns={
-            "EMPRESA_GRUPO": "Empresa",
-            "BANCO_GRUPO": "Banco",
-            "CONTAS": "Contas",
-            "SALDO": "Saldo consolidado",
-        }
-    )
-    st.dataframe(
-        consolidated,
-        hide_index=True,
-        use_container_width=True,
-        column_config={"Saldo consolidado": st.column_config.NumberColumn(format="R$ %.2f")},
-    )
+    st.subheader("Consolidado por mês")
+    daily_total = daily_matrix[["SALDO TOTAL"]].dropna().reset_index()
+    daily_total["ANO"] = daily_total["DATA_DT"].dt.year
+    daily_total["MES"] = daily_total["DATA_DT"].dt.month
+    month_names = {1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"}
+    monthly_rows = []
+    for (year, month), grp in daily_total.groupby(["ANO", "MES"], sort=True):
+        grp = grp.sort_values("DATA_DT")
+        initial = float(grp.iloc[0]["SALDO TOTAL"])
+        final = float(grp.iloc[-1]["SALDO TOTAL"])
+        variation = final - initial
+        pct = (variation / initial * 100) if initial else None
+        monthly_rows.append({
+            "Mês": f"{month_names[int(month)]}/{int(year)}",
+            "Saldo inicial": initial,
+            "Saldo final": final,
+            "Variação": variation,
+            "% Variação": pct,
+            "Saldo médio": float(grp["SALDO TOTAL"].mean()),
+        })
+    monthly = pd.DataFrame(monthly_rows)
+    if not monthly.empty:
+        monthly_fmt = monthly.copy()
+        for col in ["Saldo inicial", "Saldo final", "Variação", "Saldo médio"]:
+            monthly_fmt[col] = monthly_fmt[col].map(brl)
+        monthly_fmt["% Variação"] = monthly["% Variação"].map(lambda v: "—" if pd.isna(v) else f"{v:.2f}%".replace(".", ","))
+        st.dataframe(monthly_fmt, hide_index=True, use_container_width=True)
 
-    with st.expander("Ver contas individuais"):
-        detail = day[["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "SALDO"]].copy()
-        detail.columns = ["Empresa", "Banco", "Agência", "Conta", "Apelido", "Saldo"]
-        detail = detail.sort_values(["Empresa", "Banco", "Conta"])
-        st.dataframe(
-            detail,
-            hide_index=True,
-            use_container_width=True,
-            column_config={"Saldo": st.column_config.NumberColumn(format="R$ %.2f")},
-        )
-
-    st.subheader("Histórico")
-    history = saldos.dropna(subset=["DATA_DT", "SALDO"]).copy()
-    daily = history.groupby("DATA_DT", as_index=False)["SALDO"].sum().sort_values("DATA_DT")
-    fig = px.line(daily, x="DATA_DT", y="SALDO", markers=True, labels={"DATA_DT": "Data", "SALDO": "Saldo consolidado"})
-    fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white", paper_bgcolor="white", yaxis_tickprefix="R$ ")
-    st.plotly_chart(fig, use_container_width=True)
-
-    options = ["Todas as contas"] + sorted(history["EMPRESA"].dropna().astype(str).unique().tolist())
-    company = st.selectbox("Histórico por empresa", options)
-    filtered = history if company == "Todas as contas" else history[history["EMPRESA"] == company]
-    pivot = filtered.pivot_table(index="DATA_DT", columns="CONTA", values="SALDO", aggfunc="sum").sort_index()
-    pivot["TOTAL"] = pivot.sum(axis=1)
-    pivot.index = pivot.index.strftime("%d/%m/%Y")
-    st.dataframe(pivot.style.format(lambda x: brl(x)), use_container_width=True)
-
+    with st.expander("Ver composição das contas"):
+        detail = period[["DATA_DT", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "EMPRESA_GRUPO", "SALDO"]].copy()
+        detail["DATA_DT"] = detail["DATA_DT"].dt.strftime("%d/%m/%Y")
+        detail.columns = ["Data", "Empresa original", "Banco", "Agência", "Conta", "Apelido", "Empresa consolidada", "Saldo"]
+        detail = detail.sort_values(["Data", "Empresa consolidada", "Banco", "Conta"])
+        st.dataframe(detail.style.format({"Saldo": brl}), hide_index=True, use_container_width=True)
 
 def page_accounts() -> None:
     hero("Contas", "Cadastro usado para reconhecer os documentos e organizar o dashboard.")
