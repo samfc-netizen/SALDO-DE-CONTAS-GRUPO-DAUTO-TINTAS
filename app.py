@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import base64
+from pathlib import Path
 import re
 import unicodedata
 from datetime import date, datetime
@@ -48,28 +50,38 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-        :root { --navy:#102a43; --blue:#1769aa; --ink:#243b53; --muted:#627d98; --line:#d9e2ec; }
-        .stApp { background:#f4f7fa; color:var(--ink); }
-        [data-testid="stSidebar"] { background:var(--navy); }
+        :root { --navy:#0b2a4a; --blue:#0967c9; --ink:#102a43; --muted:#627d98; --line:#d9e2ec; --soft:#f5f8fc; }
+        .stApp { background:linear-gradient(180deg,#f7faff 0%,#eef4f9 100%); color:var(--ink); }
+        [data-testid="stSidebar"] { background:linear-gradient(180deg,#082845 0%,#0c355b 100%); border-right:1px solid rgba(255,255,255,.08); }
         [data-testid="stSidebar"] * { color:#fff; }
-        [data-testid="stSidebar"] .stRadio label { padding:.34rem .15rem; }
-        .hero { background:linear-gradient(125deg,#102a43,#1769aa); color:#fff; padding:1.5rem 1.7rem;
-                border-radius:16px; margin:0 0 1rem; box-shadow:0 8px 24px rgba(16,42,67,.14); }
-        .hero h1 { margin:0; font-size:1.65rem; color:#fff; }
-        .hero p { margin:.35rem 0 0; opacity:.85; }
-        .metric-card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:1rem 1.1rem;
-                       min-height:112px; box-shadow:0 3px 12px rgba(16,42,67,.06); }
-        .metric-card .label { color:var(--muted); font-size:.82rem; text-transform:uppercase; letter-spacing:.04em; }
-        .metric-card .value { color:var(--navy); font-size:1.45rem; font-weight:700; margin-top:.45rem; }
-        .status-ok { color:#16794a; font-weight:600; }
-        .status-warn { color:#ad6800; font-weight:600; }
-        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line); padding:1rem; border-radius:14px; }
-        .block-container { max-width:1280px; padding-top:1.3rem; }
+        [data-testid="stSidebar"] .stRadio > div { gap:.35rem; }
+        [data-testid="stSidebar"] .stRadio label { padding:.58rem .72rem; border-radius:10px; transition:.15s ease; }
+        [data-testid="stSidebar"] .stRadio label:hover { background:rgba(255,255,255,.08); }
+        [data-testid="stSidebar"] hr { border-color:rgba(255,255,255,.16); }
+        .sidebar-brand { text-align:center; padding:.35rem 0 1rem; }
+        .brand-circles { display:flex; justify-content:center; gap:12px; margin-bottom:12px; }
+        .brand-circle { width:82px; height:82px; border-radius:50%; background:#fff; display:flex; align-items:center; justify-content:center; border:2px solid #dbe5ef; box-shadow:0 6px 18px rgba(0,0,0,.14); overflow:hidden; }
+        .brand-circle img { width:74%; max-height:54%; object-fit:contain; }
+        .brand-title { font-size:1.12rem; font-weight:800; }
+        .brand-subtitle { font-size:.72rem; opacity:.72; margin-top:2px; }
+        .admin-label { color:#9ec3e7 !important; font-size:.72rem; letter-spacing:.09em; text-transform:uppercase; margin:.75rem .35rem .35rem; }
+        .hero { background:linear-gradient(125deg,#0b2a4a,#0b67bd); color:#fff; padding:1.25rem 1.45rem; border-radius:18px; margin:0 0 1rem; box-shadow:0 10px 28px rgba(16,42,67,.14); }
+        .hero h1 { margin:0; font-size:1.75rem; color:#fff; }
+        .hero p { margin:.35rem 0 0; opacity:.86; }
+        .metric-card { background:#fff; border:1px solid var(--line); border-radius:15px; padding:1rem 1.1rem; min-height:105px; box-shadow:0 4px 14px rgba(16,42,67,.06); }
+        .metric-card .label { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+        .metric-card .value { color:var(--navy); font-size:1.4rem; font-weight:800; margin-top:.42rem; }
+        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line); padding:.9rem 1rem; border-radius:15px; box-shadow:0 4px 14px rgba(16,42,67,.05); }
+        .block-container { max-width:1500px; padding-top:1.15rem; padding-bottom:2rem; }
+        [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:14px; overflow:hidden; box-shadow:0 4px 14px rgba(16,42,67,.04); }
+        .section-title { font-size:1.05rem; font-weight:800; color:var(--navy); margin:.75rem 0 .45rem; }
+        .bank-legend { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:.2rem 0 .75rem; }
+        .bank-pill { display:inline-flex; align-items:center; gap:7px; padding:6px 10px; background:#fff; border:1px solid var(--line); border-radius:999px; font-size:.78rem; font-weight:700; color:var(--ink); }
+        .bank-pill img { width:25px; height:25px; object-fit:contain; border-radius:6px; }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
 def hero(title: str, subtitle: str) -> None:
     st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>', unsafe_allow_html=True)
@@ -749,17 +761,15 @@ def password_gate() -> bool:
 
 
 def page_dashboard() -> None:
-    hero("Visão geral", "Acompanhe os saldos por banco, empresa e o resumo mensal.")
+    hero("Visão Geral", "Acompanhe os saldos por banco, empresa e o consolidado mensal.")
     if not password_gate():
         return
     try:
         contas, saldos = load_database(st.session_state.get("db_refresh", 0))
     except Exception as exc:
-        st.error(str(exc))
-        return
+        st.error(str(exc)); return
     if saldos.empty or saldos["DATA_DT"].dropna().empty:
-        st.info("Ainda não há saldos gravados para exibir.")
-        return
+        st.info("Ainda não há saldos gravados para exibir."); return
 
     history = saldos.dropna(subset=["DATA_DT", "SALDO"]).copy()
     aliases = contas[["BANCO", "CONTA", "APELIDO", "ORDEM"]].copy()
@@ -767,96 +777,70 @@ def page_dashboard() -> None:
     history["K"] = history["BANCO"].map(key_part) + "|" + history["CONTA"].map(key_part)
     history = history.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
     history["APELIDO"] = history["APELIDO"].fillna(history["CONTA"])
-    history["EMPRESA_GRUPO"] = history.apply(
-        lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"]), str(r["CONTA"])), axis=1
-    )
+    history["EMPRESA_GRUPO"] = history.apply(lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"]), str(r["CONTA"])), axis=1)
     history["BANCO_GRUPO"] = history["BANCO"].map(bank_group)
 
-    min_date = history["DATA_DT"].min().date()
-    max_date = history["DATA_DT"].max().date()
+    min_date, max_date = history["DATA_DT"].min().date(), history["DATA_DT"].max().date()
     f1, f2 = st.columns(2)
-    with f1:
-        start_date = st.date_input("Data inicial", value=min_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
-    with f2:
-        end_date = st.date_input("Data final", value=max_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+    with f1: start_date = st.date_input("Data inicial", value=min_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
+    with f2: end_date = st.date_input("Data final", value=max_date, min_value=min_date, max_value=max_date, format="DD/MM/YYYY")
     if start_date > end_date:
-        st.error("A data inicial não pode ser maior que a data final.")
-        return
+        st.error("A data inicial não pode ser maior que a data final."); return
 
     period = history[(history["DATA_DT"].dt.date >= start_date) & (history["DATA_DT"].dt.date <= end_date)].copy()
-    if period.empty:
-        st.warning("Não há saldos no período selecionado.")
-        return
+    period["COLUNA"] = period.apply(lambda r: f'{r["EMPRESA_GRUPO"]} ITAÚ' if r["BANCO_GRUPO"] == "Itaú" else f'{r["EMPRESA_GRUPO"]} BB', axis=1)
+    column_order = ["ÚNICA ITAÚ","ÚNICA BB","MERCADO ITAÚ","MERCADO BB","V&T ITAÚ","V&T BB","ÉTICA ITAÚ","ÉTICA BB","DT TINTAS ITAÚ","DT TINTAS BB","DAUTO ITAÚ","DAUTO BB"]
+    present = [c for c in column_order if c in set(history["COLUNA"] if "COLUNA" in history.columns else period["COLUNA"])]
+    # Preserve the standard business columns even when the selected range has no launch.
+    known_groups = set(period["COLUNA"].dropna()) if not period.empty else set()
+    present = [c for c in column_order if c in known_groups or c in {"ÚNICA ITAÚ","ÚNICA BB","MERCADO ITAÚ","MERCADO BB","V&T ITAÚ","V&T BB","ÉTICA ITAÚ","ÉTICA BB","DT TINTAS ITAÚ","DT TINTAS BB"}]
+    extras = sorted([c for c in known_groups if c not in present]); present += extras
 
-    # O total de cada dia usa somente as posições efetivamente gravadas naquela data.
-    # As regras de consolidação de empresa são as mesmas já usadas pelo aplicativo.
-    period["COLUNA"] = period.apply(
-        lambda r: f'{r["EMPRESA_GRUPO"]} ITAÚ' if r["BANCO_GRUPO"] == "Itaú" else r["EMPRESA_GRUPO"], axis=1
-    )
-    column_order = [
-        "ÚNICA ITAÚ", "ÚNICA", "MERCADO ITAÚ", "MERCADO", "V&T ITAÚ", "V&T",
-        "ÉTICA ITAÚ", "ÉTICA", "DT TINTAS ITAÚ", "DT TINTAS", "DAUTO ITAÚ", "DAUTO"
-    ]
-    present = [c for c in column_order if c in set(period["COLUNA"])]
-    extras = [c for c in period["COLUNA"].dropna().unique() if c not in present]
-    present += sorted(extras)
+    business_days = pd.date_range(start=start_date, end=end_date, freq="B")
+    raw_matrix = period.pivot_table(index="DATA_DT", columns="COLUNA", values="SALDO", aggfunc="sum") if not period.empty else pd.DataFrame()
+    daily_matrix = raw_matrix.reindex(index=business_days, columns=present, fill_value=0).fillna(0)
+    daily_matrix["SALDO TOTAL"] = daily_matrix.sum(axis=1)
 
-    daily_matrix = period.pivot_table(index="DATA_DT", columns="COLUNA", values="SALDO", aggfunc="sum")
-    daily_matrix = daily_matrix.reindex(columns=present).sort_index()
-    daily_matrix["SALDO TOTAL"] = daily_matrix.sum(axis=1, min_count=1)
+    latest_total = float(daily_matrix.iloc[-1]["SALDO TOTAL"]) if not daily_matrix.empty else 0.0
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Contas Banco do Brasil", int(contas[contas["BANCO"].map(bank_group)=="Banco do Brasil"].shape[0]))
+    c2.metric("Contas Itaú", int(contas[contas["BANCO"].map(bank_group)=="Itaú"].shape[0]))
+    c3.metric("Empresas", int(history["EMPRESA_GRUPO"].nunique()))
+    c4.metric("Saldo na última data", brl(latest_total))
 
-    latest_total = daily_matrix["SALDO TOTAL"].dropna().iloc[-1]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Empresas", period["EMPRESA_GRUPO"].nunique())
-    c2.metric("Bancos", period["BANCO_GRUPO"].nunique())
-    c3.metric("Contas ativas no período", period["CONTA"].nunique())
-    c4.metric("Saldo na última posição", brl(latest_total))
-
-    st.subheader("Saldos por banco e empresa")
+    st.markdown('<div class="section-title">🏦 Saldos por Banco e Empresa</div>', unsafe_allow_html=True)
+    st.caption("Dias úteis sem lançamento aparecem zerados. Sábados e domingos são desconsiderados.")
     display = daily_matrix.copy()
-    display.index = display.index.strftime("%d/%m/%Y")
-    display.index.name = "Data"
-    st.dataframe(
-        display.style.format(lambda x: brl(x) if pd.notna(x) else "—"),
-        use_container_width=True,
-        height=min(620, 88 + 35 * len(display)),
-    )
-    st.caption("DAUTO Serviços (conta 98530-8) permanece incorporada à ÉTICA Itaú, conforme a regra existente no sistema.")
+    weekday = {0:"Seg",1:"Ter",2:"Qua",3:"Qui",4:"Sex",5:"Sáb",6:"Dom"}
+    display.insert(0, "DIA", [weekday[d.weekday()] for d in display.index])
+    display.insert(0, "DATA", [d.strftime("%d/%m/%Y") for d in display.index])
+    display = display.reset_index(drop=True)
+    money_cols = [c for c in display.columns if c not in ["DATA","DIA"]]
+    st.dataframe(display, hide_index=True, use_container_width=True, height=min(650, 86 + 35*len(display)), column_config={c: st.column_config.NumberColumn(c, format="R$ %.2f") for c in money_cols})
+    st.caption("DAUTO Serviços (conta 98530-8) permanece incorporada à ÉTICA Itaú, conforme a regra do sistema.")
 
-    st.subheader("Consolidado por mês")
-    daily_total = daily_matrix[["SALDO TOTAL"]].dropna().reset_index()
-    daily_total["ANO"] = daily_total["DATA_DT"].dt.year
-    daily_total["MES"] = daily_total["DATA_DT"].dt.month
-    month_names = {1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"}
-    monthly_rows = []
-    for (year, month), grp in daily_total.groupby(["ANO", "MES"], sort=True):
-        grp = grp.sort_values("DATA_DT")
-        initial = float(grp.iloc[0]["SALDO TOTAL"])
-        final = float(grp.iloc[-1]["SALDO TOTAL"])
-        variation = final - initial
-        pct = (variation / initial * 100) if initial else None
-        monthly_rows.append({
-            "Mês": f"{month_names[int(month)]}/{int(year)}",
-            "Saldo inicial": initial,
-            "Saldo final": final,
-            "Variação": variation,
-            "% Variação": pct,
-            "Saldo médio": float(grp["SALDO TOTAL"].mean()),
-        })
-    monthly = pd.DataFrame(monthly_rows)
-    if not monthly.empty:
-        monthly_fmt = monthly.copy()
-        for col in ["Saldo inicial", "Saldo final", "Variação", "Saldo médio"]:
-            monthly_fmt[col] = monthly_fmt[col].map(brl)
-        monthly_fmt["% Variação"] = monthly["% Variação"].map(lambda v: "—" if pd.isna(v) else f"{v:.2f}%".replace(".", ","))
-        st.dataframe(monthly_fmt, hide_index=True, use_container_width=True)
+    st.markdown('<div class="section-title">▥ Consolidado por Mês</div>', unsafe_allow_html=True)
+    # Monthly summary uses actual recorded business days; missing dates are not carried forward.
+    all_period = history[(history["DATA_DT"].dt.date >= start_date) & (history["DATA_DT"].dt.date <= end_date)].copy()
+    actual_daily = all_period.groupby("DATA_DT", as_index=False)["SALDO"].sum().sort_values("DATA_DT")
+    actual_daily["ANO"] = actual_daily["DATA_DT"].dt.year; actual_daily["MES"] = actual_daily["DATA_DT"].dt.month
+    names={1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"}
+    rows=[]
+    for (year,month),grp in actual_daily.groupby(["ANO","MES"], sort=True):
+        grp=grp.sort_values("DATA_DT"); initial=float(grp.iloc[0]["SALDO"]); final=float(grp.iloc[-1]["SALDO"]); variation=final-initial
+        rows.append({"Mês":f"{names[int(month)]}/{int(year)}","Saldo inicial":initial,"Saldo final":final,"Variação":variation,"% Variação":(variation/initial*100) if initial else None,"Saldo médio":float(grp["SALDO"].mean())})
+    monthly=pd.DataFrame(rows)
+    if monthly.empty: st.info("Não há lançamentos para consolidar no período selecionado.")
+    else:
+        cfg={c:st.column_config.NumberColumn(c, format="R$ %.2f") for c in ["Saldo inicial","Saldo final","Variação","Saldo médio"]}
+        cfg["% Variação"]=st.column_config.NumberColumn("% Variação", format="%.2f%%")
+        st.dataframe(monthly, hide_index=True, use_container_width=True, column_config=cfg)
 
     with st.expander("Ver composição das contas"):
-        detail = period[["DATA_DT", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "EMPRESA_GRUPO", "SALDO"]].copy()
-        detail["DATA_DT"] = detail["DATA_DT"].dt.strftime("%d/%m/%Y")
-        detail.columns = ["Data", "Empresa original", "Banco", "Agência", "Conta", "Apelido", "Empresa consolidada", "Saldo"]
-        detail = detail.sort_values(["Data", "Empresa consolidada", "Banco", "Conta"])
-        st.dataframe(detail.style.format({"Saldo": brl}), hide_index=True, use_container_width=True)
+        detail=period[["DATA_DT","EMPRESA","BANCO","AGENCIA","CONTA","APELIDO","EMPRESA_GRUPO","SALDO"]].copy()
+        detail["DATA_DT"]=detail["DATA_DT"].dt.strftime("%d/%m/%Y")
+        detail.columns=["Data","Empresa original","Banco","Agência","Conta","Apelido","Empresa consolidada","Saldo"]
+        st.dataframe(detail, hide_index=True, use_container_width=True, column_config={"Saldo":st.column_config.NumberColumn(format="R$ %.2f")})
 
 def page_accounts() -> None:
     hero("Contas", "Cadastro usado para reconhecer os documentos e organizar o dashboard.")
@@ -874,23 +858,16 @@ def main() -> None:
     st.set_page_config(page_title="Saldos Bancários", page_icon="🏦", layout="wide")
     inject_css()
     with st.sidebar:
-        st.markdown("## Dauto Financeiro")
-        st.caption("Controle diário de saldos")
-        page = st.radio(
-            "Navegação",
-            ["Atualizar Saldos", "Importar Histórico", "Visão Geral", "Contas"],
-            label_visibility="collapsed",
-        )
-        st.divider()
-        st.caption("Dados armazenados no Google Sheets")
-    if page == "Atualizar Saldos":
-        page_update()
-    elif page == "Importar Histórico":
-        page_history_import()
-    elif page == "Visão Geral":
-        page_dashboard()
+        st.markdown('<div class="sidebar-brand"><div class="brand-circles"><div class="brand-circle"><b style="color:#e52b38;font-size:14px">ÚNICA</b></div><div class="brand-circle"><b style="color:#123b8f;font-size:14px">DAUTO</b></div></div><div class="brand-title">Grupo Dauto Tintas</div><div class="brand-subtitle">Controle diário de saldos</div></div>', unsafe_allow_html=True)
+        page = st.radio("Navegação", ["🏠  Visão Geral", "📷  Atualizar Saldos", "────────────", "☁️  Importar Histórico", "🏦  Contas"], label_visibility="collapsed")
+        st.divider(); st.caption("Dados armazenados no Google Sheets")
+    if page == "🏠  Visão Geral": page_dashboard()
+    elif page == "📷  Atualizar Saldos": page_update()
+    elif page == "☁️  Importar Histórico": page_history_import()
+    elif page == "🏦  Contas": page_accounts()
     else:
-        page_accounts()
+        st.session_state["noop"] = True
+        st.info("Selecione uma opção do menu.")
 
 
 if __name__ == "__main__":
