@@ -231,7 +231,11 @@ def load_database(_refresh: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     contas = pd.DataFrame(contas_ws.get_all_records(), columns=CONTAS_HEADERS)
     saldos = pd.DataFrame(saldos_ws.get_all_records(), columns=SALDOS_HEADERS)
     if not saldos.empty:
-        saldos["SALDO"] = saldos["SALDO"].map(parse_brl)
+        # SALDO is persisted as integer cents. This avoids decimal-separator changes
+        # caused by the spreadsheet locale (for example, 106531.91 -> 10653191).
+        saldos["SALDO"] = saldos["SALDO"].map(parse_brl).map(
+            lambda value: value / 100 if value is not None else None
+        )
         saldos["DATA_DT"] = pd.to_datetime(saldos["DATA"], dayfirst=True, errors="coerce")
     return contas, saldos
 
@@ -506,11 +510,12 @@ def save_balances(rows: pd.DataFrame, position_date: date) -> tuple[int, int]:
         balance = parse_brl(row["Saldo identificado"])
         if not bool(row["Salvar"]) or balance is None or not str(row["Conta"]).strip():
             continue
+        balance_cents = int(round(balance * 100))
         key = (date_text, key_part(row["Banco"]), key_part(row["Conta"]))
         stable_id = hashlib.sha1("|".join(key).encode("utf-8")).hexdigest()[:16]
         payload = [
             stable_id, date_text, row["Empresa"], row["Banco"], row["Agência"], row["Conta"],
-            balance, row["Arquivo"], row.get("Origem", "OCR"), row.get("Confiança", ""),
+            balance_cents, row["Arquivo"], row.get("Origem", "OCR"), row.get("Confiança", ""),
             datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
         ]
         if key in index:
