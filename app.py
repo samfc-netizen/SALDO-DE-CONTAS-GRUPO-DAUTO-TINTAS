@@ -1,756 +1,593 @@
+from __future__ import annotations
+
+import hashlib
 import io
 import re
-import json
-import hashlib
-import cv2
 import unicodedata
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
+from typing import Any
 
-import fitz  # PyMuPDF
-import gspread
-import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
-from google.oauth2.service_account import Credentials
-from PIL import Image
-from rapidocr_onnxruntime import RapidOCR
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
-# =========================================================
-# CONFIGURAÇÃO
-# =========================================================
-st.set_page_config(
-    page_title="Saldo de Contas | Grupo Dauto",
-    page_icon="💰",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 SPREADSHEET_ID = "1jocHQg3sbv_v8KpPNK8Y4KWrSEmZW-Eee8k_ugLFnaI"
-SHEET_CONTAS = "CONTAS"
-SHEET_SALDOS = "SALDOS"
-PAINEL_PASSWORD = "Dauto@10.10"
-
-CONTAS_PADRAO = [
-    # Empresa, Banco, Agência, Conta, Apelido, Ativa, Ordem
-    ["DT TINTAS", "Banco do Brasil", "1231-9", "62.810-7", "DT TINTAS BB", "SIM", 1],
-    ["ÉTICA", "Banco do Brasil", "1231-9", "62.686-4", "ÉTICA BB", "SIM", 2],
-    ["MERCADO", "Banco do Brasil", "1231-9", "33.300-X", "MERCADO BB", "SIM", 3],
-    ["V&T", "Banco do Brasil", "1231-9", "62.619-8", "V&T BB", "SIM", 4],
-    ["ÚNICA", "Banco do Brasil", "1231-9", "62.608-2", "ÚNICA BB", "SIM", 5],
-
-    ["ÚNICA ATACADISTA TINTAS LTDA", "Itaú", "654", "73733-7", "ÚNICA ITAÚ", "SIM", 6],
-    ["DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "98240-4", "DT ITAÚ 98240-4", "SIM", 7],
-    ["DAUTO TINTAS SERVIÇOS E PRODUTOS", "Itaú", "654", "98530-8", "DAUTO ITAÚ 98530-8", "SIM", 8],
-    ["DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "99190-0", "DT ITAÚ 99190-0", "SIM", 9],
-    ["DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "99191-8", "DT ITAÚ 99191-8", "SIM", 10],
-    ["ÉTICA COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99195-9", "ÉTICA ITAÚ 99195-9", "SIM", 11],
-    ["ÉTICA COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99200-7", "ÉTICA ITAÚ 99200-7", "SIM", 12],
-    ["VET COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99201-5", "V&T ITAÚ 99201-5", "SIM", 13],
-    ["VET COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99202-3", "V&T ITAÚ 99202-3", "SIM", 14],
-    ["MERCADO DAS TINTAS EIRELI", "Itaú", "654", "99203-1", "MERCADO ITAÚ 99203-1", "SIM", 15],
-    ["MERCADO DAS TINTAS LTDA", "Itaú", "654", "99204-9", "MERCADO ITAÚ 99204-9", "SIM", 16],
-    ["DAUTO TINTAS LTDA", "Itaú", "654", "99205-6", "DAUTO ITAÚ 99205-6", "SIM", 17],
-    ["DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "1890", "99348-6", "DT ITAÚ 99348-6", "SIM", 18],
-]
-
-HEAD_CONTAS = ["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "ATIVA", "ORDEM"]
-HEAD_SALDOS = [
+CONTAS_HEADERS = ["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "ATIVA", "ORDEM"]
+SALDOS_HEADERS = [
     "ID", "DATA", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "SALDO",
-    "ARQUIVO", "ORIGEM", "CONFIANCA", "DATA_HORA"
+    "ARQUIVO", "ORIGEM", "CONFIANCA", "DATA_HORA",
 ]
 
-# =========================================================
-# VISUAL
-# =========================================================
-st.markdown("""
-<style>
-    .stApp { background:#f4f7fb; }
-    [data-testid="stSidebar"] { background:#123d70; }
-    [data-testid="stSidebar"] * { color:white; }
-    [data-testid="stSidebar"] .stRadio label { padding:8px 4px; }
-    .hero {
-        background:linear-gradient(135deg,#123d70,#1d568f);
-        padding:24px 28px;border-radius:18px;color:white;margin-bottom:18px;
-        box-shadow:0 10px 28px rgba(18,61,112,.15)
-    }
-    .hero h1 { margin:0;color:white;font-size:28px; }
-    .hero p { margin:6px 0 0;color:#dbe9f6; }
-    .card {
-        background:white;border:1px solid #dde6f0;border-radius:15px;
-        padding:17px 18px;min-height:128px;box-shadow:0 5px 18px rgba(18,61,112,.05)
-    }
-    .card .label { color:#6e7f94;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em; }
-    .card .value { color:#17243a;font-size:24px;font-weight:800;margin-top:8px; }
-    .card .sub { color:#7d8ca0;font-size:11px;margin-top:8px; }
-    .total-card { background:#123d70;border-radius:15px;padding:18px;color:white;min-height:128px; }
-    .total-card .label { color:#cbdced;font-size:11px;font-weight:700;text-transform:uppercase; }
-    .total-card .value { font-size:28px;font-weight:800;margin-top:8px; }
-    .small-note {color:#74849a;font-size:12px;}
-    div[data-testid="stDataFrame"] {border:1px solid #dde6f0;border-radius:12px;overflow:hidden;}
-</style>
-""", unsafe_allow_html=True)
+CONTAS_INICIAIS = [
+    ("DT TINTAS COMÉRCIO VAREJISTA", "Banco do Brasil", "1231-9", "62.810-7", "DT TINTAS BB", True, 1),
+    ("ÉTICA", "Banco do Brasil", "1231-9", "62.686-4", "ÉTICA BB", True, 2),
+    ("MERCADO", "Banco do Brasil", "1231-9", "33.300-X", "MERCADO BB", True, 3),
+    ("V&T", "Banco do Brasil", "1231-9", "62.619-8", "V&T BB", True, 4),
+    ("ÚNICA", "Banco do Brasil", "1231-9", "62.608-2", "ÚNICA BB", True, 5),
+    ("ÚNICA ATACADISTA TINTAS LTDA", "Itaú", "654", "73733-7", "ÚNICA ITAÚ", True, 6),
+    ("DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "98240-4", "DT ITAÚ 98240-4", True, 7),
+    ("DAUTO TINTAS SERVIÇOS E PRODUTOS", "Itaú", "654", "98530-8", "DAUTO ITAÚ 98530-8", True, 8),
+    ("DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "99190-0", "DT ITAÚ 99190-0", True, 9),
+    ("DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "654", "99191-8", "DT ITAÚ 99191-8", True, 10),
+    ("ÉTICA COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99195-9", "ÉTICA ITAÚ 99195-9", True, 11),
+    ("ÉTICA COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99200-7", "ÉTICA ITAÚ 99200-7", True, 12),
+    ("VET COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99201-5", "V&T ITAÚ 99201-5", True, 13),
+    ("VET COMÉRCIO VAREJISTA DE TINTAS", "Itaú", "654", "99202-3", "V&T ITAÚ 99202-3", True, 14),
+    ("MERCADO DAS TINTAS EIRELI", "Itaú", "654", "99203-1", "MERCADO ITAÚ 99203-1", True, 15),
+    ("MERCADO DAS TINTAS LTDA", "Itaú", "654", "99204-9", "MERCADO ITAÚ 99204-9", True, 16),
+    ("DAUTO TINTAS LTDA", "Itaú", "654", "99205-6", "DAUTO ITAÚ 99205-6", True, 17),
+    ("DT TINTAS COMÉRCIO VAREJISTA", "Itaú", "1890", "99348-6", "DT ITAÚ 99348-6", True, 18),
+]
 
-# =========================================================
-# UTILITÁRIOS
-# =========================================================
-def norm(v):
-    s = unicodedata.normalize("NFD", str(v or ""))
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-    return re.sub(r"\s+", " ", s).strip().upper()
 
-def norm_key(v):
-    return re.sub(r"[^0-9A-Z]", "", norm(v))
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        :root { --navy:#102a43; --blue:#1769aa; --ink:#243b53; --muted:#627d98; --line:#d9e2ec; }
+        .stApp { background:#f4f7fa; color:var(--ink); }
+        [data-testid="stSidebar"] { background:var(--navy); }
+        [data-testid="stSidebar"] * { color:#fff; }
+        [data-testid="stSidebar"] .stRadio label { padding:.34rem .15rem; }
+        .hero { background:linear-gradient(125deg,#102a43,#1769aa); color:#fff; padding:1.5rem 1.7rem;
+                border-radius:16px; margin:0 0 1rem; box-shadow:0 8px 24px rgba(16,42,67,.14); }
+        .hero h1 { margin:0; font-size:1.65rem; color:#fff; }
+        .hero p { margin:.35rem 0 0; opacity:.85; }
+        .metric-card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:1rem 1.1rem;
+                       min-height:112px; box-shadow:0 3px 12px rgba(16,42,67,.06); }
+        .metric-card .label { color:var(--muted); font-size:.82rem; text-transform:uppercase; letter-spacing:.04em; }
+        .metric-card .value { color:var(--navy); font-size:1.45rem; font-weight:700; margin-top:.45rem; }
+        .status-ok { color:#16794a; font-weight:600; }
+        .status-warn { color:#ad6800; font-weight:600; }
+        div[data-testid="stMetric"] { background:#fff; border:1px solid var(--line); padding:1rem; border-radius:14px; }
+        .block-container { max-width:1280px; padding-top:1.3rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-def norm_bank(v):
-    s = norm(v)
-    if "ITAU" in s:
-        return "ITAU"
-    if s == "BB" or "BANCO DO BRASIL" in s:
-        return "BB"
-    return s
 
-def brl(v):
+def hero(title: str, subtitle: str) -> None:
+    st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>', unsafe_allow_html=True)
+
+
+def brl(value: Any) -> str:
     try:
-        x = float(v)
-        txt = f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return f"R$ {txt}"
-    except Exception:
+        number = float(value)
+    except (TypeError, ValueError):
         return "—"
+    sign = "-" if number < 0 else ""
+    raw = f"{abs(number):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"{sign}R$ {raw}"
 
-def money_to_float(v):
-    if v is None:
+
+def parse_brl(value: Any) -> float | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    s = str(v).strip().upper().replace("R$", "").replace(" ", "")
-    negative = s.startswith("-") or s.endswith("D")
-    s = re.sub(r"[CD]$", "", s).replace("-", "")
-    # BR: 21.576,15
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        # OCR às vezes troca vírgula por ponto no decimal
-        parts = s.split(".")
-        if len(parts) == 2 and len(parts[-1]) == 2:
-            pass
-        else:
-            s = s.replace(".", "")
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
+    text = str(value).strip().upper().replace("R$", "").replace(" ", "")
+    if not text:
+        return None
+    negative = text.endswith("-") or (text.startswith("(") and text.endswith(")"))
+    text = text.strip("()-")
+    text = re.sub(r"[^0-9,.-]", "", text)
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
     try:
-        n = float(re.sub(r"[^0-9.]", "", s))
-        return -n if negative else n
-    except Exception:
+        result = float(Decimal(text))
+        return -result if negative else result
+    except (InvalidOperation, ValueError):
         return None
 
-def extract_money(line):
-    vals = re.findall(r"(?:R\$\s*)?-?\s*\d{1,3}(?:\.\d{3})*,\d{2}\s*[CD]?|(?:R\$\s*)?-?\s*\d+,\d{2}\s*[CD]?", str(line), flags=re.I)
-    if not vals:
-        return None
-    return money_to_float(vals[-1])
 
-def clean_account(v):
-    return str(v or "").strip().replace("–", "-").replace("—", "-").replace(" ", "")
+def key_part(value: Any) -> str:
+    return re.sub(r"[^0-9A-Z]", "", str(value).upper())
 
-def safe_date(v):
-    if isinstance(v, date):
-        return v.strftime("%Y-%m-%d")
-    s = str(v or "")
-    if re.match(r"\d{4}-\d{2}-\d{2}", s):
-        return s[:10]
-    try:
-        return pd.to_datetime(s, dayfirst=True).strftime("%Y-%m-%d")
-    except Exception:
-        return s
 
-# =========================================================
-# GOOGLE SHEETS
-# =========================================================
-def credentials_from_secrets():
-    """
-    Aceita:
-    [gcp_service_account]
-    type = "service_account"
-    ...
-    """
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError(
-            "Credencial do Google não encontrada. Configure [gcp_service_account] "
-            "no .streamlit/secrets.toml ou nos Secrets do Streamlit Cloud."
-        )
-    info = dict(st.secrets["gcp_service_account"])
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    return Credentials.from_service_account_info(info, scopes=scopes)
+def plain(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value)
+    return "".join(ch for ch in value if not unicodedata.combining(ch)).upper()
+
+
+def account_group(alias: str, bank: str) -> str:
+    a = plain(alias)
+    if plain(bank).startswith("BANCO DO BRASIL"):
+        return re.sub(r"\s+", " ", re.sub(r"\s+BB$", " BB", alias)).strip()
+    for prefix, label in [("DT ", "DT ITAÚ"), ("DAUTO ", "DAUTO ITAÚ"), ("ETICA ", "ÉTICA ITAÚ"),
+                          ("UNICA ", "ÚNICA ITAÚ"), ("MERCADO ", "MERCADO ITAÚ"), ("V&T ", "V&T ITAÚ")]:
+        if a.startswith(prefix):
+            return label
+    return alias
+
 
 @st.cache_resource(show_spinner=False)
-def get_book():
-    gc = gspread.authorize(credentials_from_secrets())
-    return gc.open_by_key(SPREADSHEET_ID)
+def sheets_client():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except ImportError as exc:
+        raise RuntimeError("Dependências do Google Sheets não instaladas.") from exc
 
-def ensure_worksheet(book, title, headers, rows=1000, cols=20):
+    secrets = None
+    try:
+        for name in ("google_service_account", "gcp_service_account"):
+            if name in st.secrets:
+                secrets = dict(st.secrets[name])
+                break
+    except Exception:
+        secrets = None
+    if not secrets:
+        raise RuntimeError(
+            "Credencial do Google não configurada. Adicione a seção [google_service_account] "
+            "aos Secrets do Streamlit e compartilhe a planilha com o e-mail client_email."
+        )
+    required = {"type", "project_id", "private_key", "client_email", "token_uri"}
+    missing = sorted(required - set(secrets))
+    if missing:
+        raise RuntimeError("Credencial incompleta. Campos ausentes: " + ", ".join(missing))
+    credentials = Credentials.from_service_account_info(
+        secrets,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return gspread.authorize(credentials)
+
+
+def get_book():
+    return sheets_client().open_by_key(SPREADSHEET_ID)
+
+
+def ensure_worksheet(book, title: str, headers: list[str], rows: int = 1000):
+    import gspread
     try:
         ws = book.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = book.add_worksheet(title=title, rows=rows, cols=cols)
-    first = ws.row_values(1)
-    if first != headers:
-        ws.update("A1", [headers])
+        ws = book.add_worksheet(title=title, rows=rows, cols=max(12, len(headers)))
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(headers, value_input_option="RAW")
+    elif values[0] != headers:
+        ws.update(range_name=f"A1:{chr(64 + len(headers))}1", values=[headers])
     return ws
 
-def prepare_database():
+
+def ensure_database():
     book = get_book()
-    ws_contas = ensure_worksheet(book, SHEET_CONTAS, HEAD_CONTAS, 200, 10)
-    ws_saldos = ensure_worksheet(book, SHEET_SALDOS, HEAD_SALDOS, 5000, 15)
-
-    existing = ws_contas.get_all_records()
-    keys = {
-        (norm_bank(r.get("BANCO")), norm_key(r.get("AGENCIA")), norm_key(r.get("CONTA")))
-        for r in existing
+    contas_ws = ensure_worksheet(book, "CONTAS", CONTAS_HEADERS, 100)
+    saldos_ws = ensure_worksheet(book, "SALDOS", SALDOS_HEADERS, 5000)
+    existing = contas_ws.get_all_records()
+    existing_keys = {
+        (key_part(row.get("BANCO")), key_part(row.get("AGENCIA")), key_part(row.get("CONTA")))
+        for row in existing
     }
-    missing = [
-        row for row in CONTAS_PADRAO
-        if (norm_bank(row[1]), norm_key(row[2]), norm_key(row[3])) not in keys
-    ]
-    if missing:
-        ws_contas.append_rows(missing, value_input_option="USER_ENTERED")
-    return book, ws_contas, ws_saldos
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_accounts():
-    _, ws, _ = prepare_database()
-    rows = ws.get_all_records()
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=HEAD_CONTAS)
-    for c in HEAD_CONTAS:
-        if c not in df.columns:
-            df[c] = ""
-    df["ORDEM"] = pd.to_numeric(df["ORDEM"], errors="coerce").fillna(999).astype(int)
-    return df.sort_values("ORDEM").reset_index(drop=True)
-
-@st.cache_data(ttl=15, show_spinner=False)
-def load_balances():
-    _, _, ws = prepare_database()
-    rows = ws.get_all_records()
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=HEAD_SALDOS)
-    for c in HEAD_SALDOS:
-        if c not in df.columns:
-            df[c] = ""
-    df["SALDO"] = pd.to_numeric(
-        df["SALDO"].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
-        errors="coerce"
-    ).fillna(0)
-    df["DATA"] = df["DATA"].apply(safe_date)
-    return df
-
-def find_registered_account(bank, agency, account):
-    df = load_accounts()
-    if df.empty:
-        return None
-    b, a, c = norm_bank(bank), norm_key(agency), norm_key(account)
-    for _, r in df.iterrows():
-        if norm_bank(r["BANCO"]) == b and norm_key(r["CONTA"]) == c:
-            if not a or norm_key(r["AGENCIA"]) == a:
-                return r.to_dict()
-    # fallback pela conta + banco
-    for _, r in df.iterrows():
-        if norm_bank(r["BANCO"]) == b and norm_key(r["CONTA"]) == c:
-            return r.to_dict()
-    return None
-
-def upsert_balances(items, position_date):
-    _, _, ws = prepare_database()
-    current = ws.get_all_values()
-    header = current[0] if current else HEAD_SALDOS
-    col = {name: i for i, name in enumerate(header)}
-    index = {}
-    for row_number, row in enumerate(current[1:], start=2):
-        if len(row) <= max(col.get("DATA", 1), col.get("BANCO", 3), col.get("CONTA", 5)):
-            continue
-        key = (
-            safe_date(row[col["DATA"]]),
-            norm_bank(row[col["BANCO"]]),
-            norm_key(row[col["CONTA"]]),
-        )
-        index[key] = row_number
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_rows = []
-    updates = []
-    for item in items:
-        if not item.get("SELECIONAR", True):
-            continue
-        key = (safe_date(position_date), norm_bank(item["BANCO"]), norm_key(item["CONTA"]))
-        rid = hashlib.sha1("|".join(key).encode()).hexdigest()[:16]
-        row = [
-            rid, safe_date(position_date), item.get("EMPRESA", ""), item.get("BANCO", ""),
-            item.get("AGENCIA", ""), item.get("CONTA", ""), float(item.get("SALDO", 0)),
-            item.get("ARQUIVO", ""), item.get("ORIGEM", ""), item.get("CONFIANCA", ""), now
-        ]
-        if key in index:
-            updates.append((index[key], row))
-        else:
-            new_rows.append(row)
-
-    for row_num, row in updates:
-        ws.update(f"A{row_num}:K{row_num}", [row], value_input_option="USER_ENTERED")
+    new_rows = [list(row) for row in CONTAS_INICIAIS if (key_part(row[1]), key_part(row[2]), key_part(row[3])) not in existing_keys]
     if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+        contas_ws.append_rows(new_rows, value_input_option="USER_ENTERED")
+    return contas_ws, saldos_ws
 
-    load_balances.clear()
-    return len(new_rows), len(updates)
 
-# =========================================================
-# LEITURA / OCR
-# =========================================================
-@st.cache_resource(show_spinner=False)
-def get_ocr():
-    return RapidOCR()
+@st.cache_data(ttl=60, show_spinner=False)
+def load_database(_refresh: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
+    contas_ws, saldos_ws = ensure_database()
+    contas = pd.DataFrame(contas_ws.get_all_records(), columns=CONTAS_HEADERS)
+    saldos = pd.DataFrame(saldos_ws.get_all_records(), columns=SALDOS_HEADERS)
+    if not saldos.empty:
+        saldos["SALDO"] = saldos["SALDO"].map(parse_brl)
+        saldos["DATA_DT"] = pd.to_datetime(saldos["DATA"], dayfirst=True, errors="coerce")
+    return contas, saldos
 
-def preprocess_image(pil_image):
-    """
-    Pré-processamento para OCR usando OpenCV.
-    O projeto fixa Python 3.12 via runtime.txt para garantir compatibilidade
-    com opencv-python-headless / RapidOCR no Streamlit Cloud.
-    """
-    img = np.array(pil_image.convert("RGB"))
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    if gray.shape[1] < 1600:
-        scale = 1600 / gray.shape[1]
-        gray = cv2.resize(
-            gray, None, fx=scale, fy=scale,
-            interpolation=cv2.INTER_CUBIC
-        )
+def local_accounts() -> pd.DataFrame:
+    return pd.DataFrame(CONTAS_INICIAIS, columns=CONTAS_HEADERS)
 
-    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-    return gray
 
-def ocr_image(pil_image):
-    engine = get_ocr()
-    img = preprocess_image(pil_image)
-    result, _ = engine(img)
-    if not result:
-        return ""
-    # RapidOCR: [box, text, score]
-    lines = [str(x[1]) for x in result if len(x) >= 3 and float(x[2]) >= 0.35]
-    return "\n".join(lines)
+def get_accounts() -> pd.DataFrame:
+    try:
+        contas, _ = load_database(st.session_state.get("db_refresh", 0))
+        return contas if not contas.empty else local_accounts()
+    except Exception:
+        return local_accounts()
 
-def pdf_text_or_ocr(file_bytes):
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
+
+def preprocess_image(raw: bytes | Image.Image) -> Image.Image:
+    image = raw.copy() if isinstance(raw, Image.Image) else Image.open(io.BytesIO(raw))
+    image = ImageOps.exif_transpose(image).convert("L")
+    if image.width < 1800:
+        scale = 1800 / image.width
+        image = image.resize((1800, int(image.height * scale)), Image.Resampling.LANCZOS)
+    image = ImageOps.autocontrast(image, cutoff=1)
+    image = ImageEnhance.Contrast(image).enhance(1.35)
+    return image.filter(ImageFilter.SHARPEN)
+
+
+def ocr_image(image: Image.Image, psm: int = 6) -> str:
+    try:
+        import pytesseract
+        config = f"--oem 3 --psm {psm}"
+        try:
+            return pytesseract.image_to_string(image, lang="por+eng", config=config)
+        except pytesseract.TesseractError:
+            return pytesseract.image_to_string(image, lang="eng", config=config)
+    except Exception as exc:
+        raise RuntimeError(
+            "OCR indisponível. Confirme que tesseract-ocr e tesseract-ocr-por estão no packages.txt."
+        ) from exc
+
+
+def known_match(found: str, accounts: pd.DataFrame, bank: str) -> dict[str, Any] | None:
+    target = key_part(found)
+    subset = accounts[accounts["BANCO"].map(plain).str.contains(plain(bank), regex=False)]
+    best: tuple[float, dict[str, Any] | None] = (0.0, None)
+    for row in subset.to_dict("records"):
+        candidate = key_part(row["CONTA"])
+        score = SequenceMatcher(None, target, candidate).ratio()
+        if target == candidate:
+            score = 1.0
+        if score > best[0]:
+            best = (score, row)
+    return best[1] if best[0] >= 0.68 else None
+
+
+MONEY_PATTERN = r"(?:R\$\s*)?[-(]?\d{1,3}(?:\.\d{3})*,\d{2}[)-]?"
+
+
+def extract_bb(raw: bytes, filename: str, accounts: pd.DataFrame) -> list[dict[str, Any]]:
+    text = ocr_image(preprocess_image(raw), psm=6)
+    normalized = plain(text)
+    candidates = re.findall(r"\b\d{2,3}[.\s-]?\d{3}[\s-]?[0-9X]\b", normalized)
+    # The known account list protects against OCR punctuation and one-character mistakes.
+    found_account = None
+    account = None
+    for candidate in candidates:
+        match = known_match(candidate, accounts, "BANCO DO BRASIL")
+        if match:
+            found_account, account = candidate, match
+            if key_part(candidate) == key_part(match["CONTA"]):
+                break
+    if not account:
+        return [result_row(filename=filename, bank="Banco do Brasil", status="Conta não identificada", confidence="Baixa")]
+
+    saldo = None
+    # Deliberately ignore "999 SALDO" and take the last standalone final "Saldo" line.
+    saldo_lines = []
+    for line in text.splitlines():
+        line_plain = plain(line).strip()
+        if re.match(r"^SALDO\b", line_plain) and "999" not in line_plain:
+            values = re.findall(MONEY_PATTERN, line, flags=re.I)
+            if values:
+                saldo_lines.append(values[-1])
+    if saldo_lines:
+        saldo = parse_brl(saldo_lines[-1])
+    if saldo is None:
+        return [result_row(account, filename, "Banco do Brasil", status="Saldo não localizado", confidence="Média")]
+    exact = key_part(found_account) == key_part(account["CONTA"])
+    return [result_row(account, filename, "Banco do Brasil", saldo, "Leitura concluída", "Alta" if exact else "Média")]
+
+
+def extract_pdf_text(raw: bytes) -> tuple[str, str]:
+    try:
+        import fitz
+        doc = fitz.open(stream=raw, filetype="pdf")
+    except Exception as exc:
+        raise RuntimeError("Arquivo PDF inválido ou corrompido.") from exc
+    direct = "\n".join(page.get_text("text") for page in doc)
+    if len(re.sub(r"\s", "", direct)) >= 100:
+        return direct, "Texto do PDF"
     pages = []
     for page in doc:
-        text = page.get_text("text") or ""
-        # Se há texto suficiente, não faz OCR.
-        if len(re.sub(r"\s+", "", text)) >= 80:
-            pages.append(text)
-        else:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            pages.append(ocr_image(img))
-    return "\n\n".join(pages)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.4, 2.4), alpha=False)
+        image = Image.open(io.BytesIO(pix.tobytes("png")))
+        pages.append(ocr_image(preprocess_image(image), psm=6))
+    return "\n".join(pages), "OCR do PDF"
 
-def read_uploaded_file(uploaded):
-    raw = uploaded.getvalue()
-    name = uploaded.name.lower()
-    if name.endswith(".pdf"):
-        return pdf_text_or_ocr(raw)
-    image = Image.open(io.BytesIO(raw))
-    return ocr_image(image)
 
-# =========================================================
-# PARSERS
-# =========================================================
-def detect_bank(text, filename=""):
-    t = norm(text)
-    f = norm(filename)
-    if "ITAU" in t or "SDO DISP P/ APLIC" in t or "ITAU" in f:
-        return "ITAU"
-    if "BB RENDE FACIL" in t or "BANCO DO BRASIL" in t or "AGENCIA E CONTA" in t:
-        return "BB"
-    return ""
+def tolerant_account_pattern(account: str) -> str:
+    chars = [re.escape(ch) for ch in key_part(account)]
+    return r"[.\s\-/]*".join(chars)
 
-def parse_itau(text, filename):
-    """
-    Estratégia:
-    1) usa as 13 contas cadastradas como âncoras;
-    2) localiza a conta no texto do PDF;
-    3) procura SDO DISP P/ APLIC HOJE no bloco da conta;
-    4) extrai o valor associado.
-    Isso evita confundir saldos/movimentos intermediários.
-    """
-    accounts = load_accounts()
-    itau = accounts[accounts["BANCO"].apply(norm_bank) == "ITAU"]
-    flat = re.sub(r"[ \t]+", " ", text.replace("\r", "\n"))
-    flat_norm = norm(flat)
-    found = []
 
-    # posições das contas conhecidas no documento
-    anchors = []
-    for _, acc in itau.iterrows():
-        variants = {
-            clean_account(acc["CONTA"]),
-            norm_key(acc["CONTA"]),
-        }
-        positions = []
-        for v in variants:
-            if not v:
-                continue
-            p = flat_norm.find(norm(v))
-            if p >= 0:
-                positions.append(p)
-        if positions:
-            anchors.append((min(positions), acc.to_dict()))
-    anchors.sort(key=lambda x: x[0])
+def find_target_balance(block: str) -> float | None:
+    lines = block.splitlines()
+    for line in lines:
+        normalized = plain(line)
+        has_target = ("SDO" in normalized and "DISP" in normalized and "APLIC" in normalized and "HOJE" in normalized)
+        if has_target:
+            values = re.findall(MONEY_PATTERN, line, flags=re.I)
+            if values:
+                return parse_brl(values[-1])
+    # OCR sometimes breaks the label and amount across two lines.
+    compact = re.sub(r"\s+", " ", plain(block))
+    match = re.search(r"SD[O0].{0,12}DISP.{0,12}APLIC.{0,12}HOJE.{0,20}?(" + MONEY_PATTERN + r")", compact)
+    return parse_brl(match.group(1)) if match else None
 
-    for idx, (start, acc) in enumerate(anchors):
-        end = anchors[idx + 1][0] if idx + 1 < len(anchors) else min(len(flat_norm), start + 5000)
-        block = flat_norm[start:end]
-        # Padrões flexíveis para "SDO DISP P/ APLIC HOJE S/CPMF"
-        marker = re.search(r"SDO\s+DISP.*?APLIC\s+HOJE", block, flags=re.S)
-        saldo = None
-        if marker:
-            after = block[marker.start(): marker.start() + 500]
-            vals = re.findall(r"(?:R\$\s*)?-?\s*\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$\s*)?-?\s*\d+,\d{2}", after)
-            if vals:
-                saldo = money_to_float(vals[0])
 
-        # fallback: procura no texto original próximo à conta
+def extract_itau(raw: bytes, filename: str, accounts: pd.DataFrame) -> list[dict[str, Any]]:
+    text, origin = extract_pdf_text(raw)
+    subset = accounts[accounts["BANCO"].map(plain).str.contains("ITAU", regex=False)].copy()
+    positions: list[tuple[int, dict[str, Any]]] = []
+    for account in subset.to_dict("records"):
+        match = re.search(tolerant_account_pattern(str(account["CONTA"])), plain(text))
+        if match:
+            positions.append((match.start(), account))
+    positions.sort(key=lambda item: item[0])
+    if not positions:
+        return [result_row(filename=filename, bank="Itaú", status="Conta não identificada", confidence="Baixa", origin=origin)]
+
+    rows = []
+    for idx, (start, account) in enumerate(positions):
+        end = positions[idx + 1][0] if idx + 1 < len(positions) else len(text)
+        block = text[start:end]
+        saldo = find_target_balance(block)
         if saldo is None:
-            conta = re.escape(clean_account(acc["CONTA"]))
-            m = re.search(
-                conta + r".{0,2500}?SDO\s+DISP.*?APLIC\s+HOJE.{0,250}?((?:R\$\s*)?\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$\s*)?\d+,\d{2})",
-                text, flags=re.I | re.S
-            )
-            if m:
-                saldo = money_to_float(m.group(1))
+            rows.append(result_row(account, filename, "Itaú", status="Saldo não localizado", confidence="Média", origin=origin))
+        else:
+            rows.append(result_row(account, filename, "Itaú", saldo, "Leitura concluída", "Alta", origin))
+    return rows
 
-        if saldo is not None:
-            found.append({
-                "SELECIONAR": True,
-                "EMPRESA": acc["EMPRESA"],
-                "BANCO": "Itaú",
-                "AGENCIA": str(acc["AGENCIA"]),
-                "CONTA": str(acc["CONTA"]),
-                "SALDO": float(saldo),
-                "STATUS": "Conta cadastrada",
-                "ARQUIVO": filename,
-                "ORIGEM": "SDO DISP P/ APLIC HOJE S/CPMF",
-                "CONFIANCA": "ALTA",
-            })
-    return found
 
-def extract_bb_account(text):
-    t = text.replace("–", "-").replace("—", "-")
-    # Exemplos: 1231-9 • 62810-7 / 1231-9 - 62608-2
-    patterns = [
-        r"(\d{3,5}\s*-\s*\d)\D{1,20}(\d{4,8}\s*-\s*[0-9Xx])",
-        r"AG[EÊ]NCIA\s+E\s+CONTA.{0,120}?(\d{3,5}\s*-\s*\d).{0,30}?(\d{4,8}\s*-\s*[0-9Xx])",
-    ]
-    for p in patterns:
-        m = re.search(p, t, flags=re.I | re.S)
-        if m:
-            return clean_account(m.group(1)), clean_account(m.group(2))
-
-    # Fallback forte: compara as 5 contas BB cadastradas contra o OCR sem pontuação.
-    compact = norm_key(t)
-    accounts = load_accounts()
-    bb = accounts[accounts["BANCO"].apply(norm_bank) == "BB"]
-    for _, r in bb.iterrows():
-        if norm_key(r["CONTA"]) in compact:
-            return str(r["AGENCIA"]), str(r["CONTA"])
-    return "", ""
-
-def extract_bb_final_balance(text):
-    """
-    Regra solicitada: usar o 'Saldo' final, abaixo de Invest. Resgate Autom.,
-    e não o 999 SALDO intermediário.
-    """
-    lines = [re.sub(r"\s+", " ", x).strip() for x in text.splitlines() if x.strip()]
-    candidates = []
-
-    # Busca de baixo para cima por uma linha cujo rótulo seja SALDO.
-    for i in range(len(lines) - 1, -1, -1):
-        n = norm(lines[i])
-        if re.match(r"^SALDO\b", n) and "999" not in n:
-            val = extract_money(lines[i])
-            if val is None:
-                # OCR pode separar rótulo e valor em linhas consecutivas.
-                for j in range(i + 1, min(i + 4, len(lines))):
-                    val = extract_money(lines[j])
-                    if val is not None:
-                        break
-            if val is not None:
-                return val
-
-    # Fallback: após "Invest. Resgate Autom." costuma haver o saldo final.
-    full = "\n".join(lines)
-    m = re.search(r"INVEST\.?\s*RESGATE\s*AUTOM.*?SALDO.{0,150}?(\d{1,3}(?:\.\d{3})*,\d{2})", full, flags=re.I | re.S)
-    if m:
-        return money_to_float(m.group(1))
-
-    # Último valor monetário do documento como fallback de baixa confiança.
-    for line in reversed(lines[-12:]):
-        val = extract_money(line)
-        if val is not None:
-            candidates.append(val)
-    return candidates[0] if candidates else None
-
-def parse_bb(text, filename):
-    agency, account = extract_bb_account(text)
-    saldo = extract_bb_final_balance(text)
-    if not account or saldo is None:
-        return []
-    acc = find_registered_account("BB", agency, account)
-    return [{
-        "SELECIONAR": True,
-        "EMPRESA": acc["EMPRESA"] if acc else "",
-        "BANCO": "Banco do Brasil",
-        "AGENCIA": acc["AGENCIA"] if acc else agency,
-        "CONTA": acc["CONTA"] if acc else account,
-        "SALDO": float(saldo),
-        "STATUS": "Conta cadastrada" if acc else "Conta não cadastrada",
-        "ARQUIVO": filename,
-        "ORIGEM": "Saldo final",
-        "CONFIANCA": "ALTA" if acc else "MÉDIA",
-    }]
-
-def process_files(files, position_date):
-    results, errors = [], []
-    progress = st.progress(0, text="Preparando leitura...")
-    total = len(files)
-
-    for i, f in enumerate(files, 1):
-        progress.progress((i - 1) / total, text=f"Lendo {i} de {total}: {f.name}")
-        try:
-            text = read_uploaded_file(f)
-            if not text.strip():
-                raise ValueError("Nenhum texto foi extraído.")
-            bank = detect_bank(text, f.name)
-            if bank == "ITAU":
-                rows = parse_itau(text, f.name)
-            elif bank == "BB":
-                rows = parse_bb(text, f.name)
-            else:
-                rows = parse_itau(text, f.name)
-                if not rows:
-                    rows = parse_bb(text, f.name)
-            if not rows:
-                raise ValueError("Arquivo lido, mas não foi possível identificar conta e saldo.")
-            results.extend(rows)
-        except Exception as e:
-            errors.append(f"{f.name}: {e}")
-
-    progress.progress(1.0, text="Leitura concluída.")
-    # Dedup por banco+conta
-    unique = {}
-    for r in results:
-        unique[(norm_bank(r["BANCO"]), norm_key(r["CONTA"]))] = r
-    return list(unique.values()), errors
-
-# =========================================================
-# DASHBOARD
-# =========================================================
-def render_dashboard():
-    df = load_balances()
-    accounts = load_accounts()
-    if df.empty:
-        st.info("Ainda não há saldos gravados.")
-        return
-
-    dates = sorted([x for x in df["DATA"].dropna().unique() if x], reverse=True)
-    selected = st.selectbox(
-        "Posição",
-        dates,
-        format_func=lambda x: pd.to_datetime(x).strftime("%d/%m/%Y"),
-    )
-    current = df[df["DATA"] == selected].copy()
-    total = current["SALDO"].sum()
-
-    st.markdown(
-        f"""<div class="total-card">
-        <div class="label">Saldo consolidado · {pd.to_datetime(selected).strftime('%d/%m/%Y')}</div>
-        <div class="value">{brl(total)}</div>
-        <div style="margin-top:8px;color:#cbdced;font-size:12px">{len(current)} conta(s) atualizada(s)</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-
-    current_map = {
-        (norm_bank(r["BANCO"]), norm_key(r["CONTA"])): float(r["SALDO"])
-        for _, r in current.iterrows()
+def result_row(
+    account: dict[str, Any] | None = None,
+    filename: str = "",
+    bank: str = "",
+    balance: float | None = None,
+    status: str = "Arquivo inválido",
+    confidence: str = "Baixa",
+    origin: str = "OCR",
+) -> dict[str, Any]:
+    account = account or {}
+    return {
+        "Salvar": balance is not None,
+        "Empresa": account.get("EMPRESA", ""),
+        "Banco": bank or account.get("BANCO", ""),
+        "Agência": str(account.get("AGENCIA", "")),
+        "Conta": str(account.get("CONTA", "")),
+        "Saldo identificado": balance,
+        "Status": status,
+        "Arquivo": filename,
+        "Confiança": confidence,
+        "Origem": origin,
     }
 
-    active = accounts[accounts["ATIVA"].astype(str).str.upper().isin(["SIM", "TRUE", "1", "S"])]
-    cols = st.columns(4)
-    for i, (_, acc) in enumerate(active.iterrows()):
-        saldo = current_map.get((norm_bank(acc["BANCO"]), norm_key(acc["CONTA"])))
-        value = brl(saldo) if saldo is not None else "Não atualizado"
-        cols[i % 4].markdown(
-            f"""<div class="card">
-            <div class="label">{acc['APELIDO'] or acc['EMPRESA']}</div>
-            <div class="value">{value}</div>
-            <div class="sub">{acc['BANCO']} · {acc['AGENCIA']} / {acc['CONTA']}</div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
 
-    st.subheader("Evolução do saldo consolidado")
-    hist = df.groupby("DATA", as_index=False)["SALDO"].sum().sort_values("DATA")
-    hist["DATA_DT"] = pd.to_datetime(hist["DATA"])
-    st.line_chart(hist.set_index("DATA_DT")["SALDO"], height=300)
+def process_file(uploaded, accounts: pd.DataFrame) -> list[dict[str, Any]]:
+    raw = uploaded.getvalue()
+    name = uploaded.name
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    try:
+        if ext == "pdf":
+            return extract_itau(raw, name, accounts)
+        if ext in {"png", "jpg", "jpeg", "webp", "tif", "tiff"}:
+            return extract_bb(raw, name, accounts)
+        return [result_row(filename=name, status="Arquivo inválido")]
+    except Exception as exc:
+        return [result_row(filename=name, status=f"Não foi possível identificar o saldo deste arquivo. ({exc})")]
 
-    st.subheader("Histórico consolidado")
-    view = hist[["DATA", "SALDO"]].copy().sort_values("DATA", ascending=False)
-    view["DATA"] = pd.to_datetime(view["DATA"]).dt.strftime("%d/%m/%Y")
-    view["SALDO"] = view["SALDO"].apply(brl)
-    st.dataframe(view.rename(columns={"DATA": "Data", "SALDO": "Saldo total"}), use_container_width=True, hide_index=True)
 
-    st.subheader("Histórico por conta")
-    pivot = df.pivot_table(index="DATA", columns="CONTA", values="SALDO", aggfunc="last").sort_index(ascending=False)
-    pivot["TOTAL"] = pivot.sum(axis=1, skipna=True)
-    pivot.index = pd.to_datetime(pivot.index).strftime("%d/%m/%Y")
-    st.dataframe(pivot.style.format(lambda x: brl(x) if pd.notna(x) else "—"), use_container_width=True)
+def save_balances(rows: pd.DataFrame, position_date: date) -> tuple[int, int]:
+    _, ws = ensure_database()
+    values = ws.get_all_values()
+    date_text = position_date.strftime("%d/%m/%Y")
+    index: dict[tuple[str, str, str], int] = {}
+    for sheet_row, row in enumerate(values[1:], start=2):
+        padded = row + [""] * (len(SALDOS_HEADERS) - len(row))
+        record = dict(zip(SALDOS_HEADERS, padded))
+        index[(record["DATA"], key_part(record["BANCO"]), key_part(record["CONTA"]))] = sheet_row
 
-# =========================================================
-# PÁGINAS
-# =========================================================
-def page_update():
-    st.markdown("""<div class="hero"><h1>Atualizar Saldos</h1>
-    <p>Importe o PDF do Itaú e as imagens do Banco do Brasil. Confira antes de gravar.</p></div>""", unsafe_allow_html=True)
-
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        position_date = st.date_input("Data da posição", value=date.today(), format="DD/MM/YYYY")
-    with c2:
-        files = st.file_uploader(
-            "Documentos bancários",
-            type=["pdf", "jpg", "jpeg", "png"],
-            accept_multiple_files=True,
-            help="Você pode enviar o PDF do Itaú e todas as imagens do Banco do Brasil de uma só vez.",
-        )
-
-    if st.button("Ler documentos", type="primary", use_container_width=True):
-        if not files:
-            st.warning("Selecione pelo menos um arquivo.")
+    inserted = updated = 0
+    for _, row in rows.iterrows():
+        balance = parse_brl(row["Saldo identificado"])
+        if not bool(row["Salvar"]) or balance is None or not str(row["Conta"]).strip():
+            continue
+        key = (date_text, key_part(row["Banco"]), key_part(row["Conta"]))
+        stable_id = hashlib.sha1("|".join(key).encode("utf-8")).hexdigest()[:16]
+        payload = [
+            stable_id, date_text, row["Empresa"], row["Banco"], row["Agência"], row["Conta"],
+            balance, row["Arquivo"], row.get("Origem", "OCR"), row.get("Confiança", ""),
+            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        ]
+        if key in index:
+            sheet_row = index[key]
+            ws.update(range_name=f"A{sheet_row}:K{sheet_row}", values=[payload], value_input_option="USER_ENTERED")
+            updated += 1
         else:
-            with st.spinner("Interpretando os documentos..."):
-                rows, errors = process_files(files, position_date)
-            st.session_state["read_rows"] = rows
-            st.session_state["read_errors"] = errors
-            st.session_state["read_date"] = position_date
+            ws.append_row(payload, value_input_option="USER_ENTERED")
+            inserted += 1
+    st.session_state["db_refresh"] = st.session_state.get("db_refresh", 0) + 1
+    load_database.clear()
+    return inserted, updated
 
-    rows = st.session_state.get("read_rows", [])
-    errors = st.session_state.get("read_errors", [])
 
-    if rows:
-        st.subheader("Conferência da leitura")
-        df = pd.DataFrame(rows)
-        show_cols = ["SELECIONAR", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "SALDO", "STATUS", "ARQUIVO"]
-        edited = st.data_editor(
-            df[show_cols],
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "SELECIONAR": st.column_config.CheckboxColumn("Salvar", default=True),
-                "SALDO": st.column_config.NumberColumn("Saldo identificado", format="R$ %.2f"),
-                "EMPRESA": st.column_config.TextColumn("Empresa"),
-                "BANCO": st.column_config.TextColumn("Banco", disabled=True),
-                "STATUS": st.column_config.TextColumn("Status", disabled=True),
-                "ARQUIVO": st.column_config.TextColumn("Arquivo", disabled=True),
-            },
-            disabled=["BANCO", "STATUS", "ARQUIVO"],
-            key="editor_leitura",
+def page_update() -> None:
+    hero("Atualizar saldos", "Envie os documentos do dia, confira os valores e confirme a atualização.")
+    left, right = st.columns([1, 2])
+    with left:
+        position_date = st.date_input("Data da posição", value=date.today(), format="DD/MM/YYYY")
+    with right:
+        uploads = st.file_uploader(
+            "PDF do Itaú e imagens do Banco do Brasil",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "tif", "tiff"],
+            accept_multiple_files=True,
         )
+    if st.button("Ler documentos", type="primary", disabled=not uploads, use_container_width=True):
+        accounts = get_accounts()
+        progress = st.progress(0, text="Preparando leitura…")
+        results: list[dict[str, Any]] = []
+        for idx, uploaded in enumerate(uploads):
+            progress.progress(idx / len(uploads), text=f"Lendo {uploaded.name}")
+            results.extend(process_file(uploaded, accounts))
+        progress.progress(1.0, text="Leitura concluída")
+        st.session_state["review_rows"] = results
+        st.session_state["position_date"] = position_date
 
-        # Reanexa campos técnicos
-        save_rows = []
-        for i, row in edited.iterrows():
-            base = rows[i].copy()
-            for c in show_cols:
-                base[c] = row[c]
-            save_rows.append(base)
-
-        selected_total = sum(float(x["SALDO"]) for x in save_rows if x.get("SELECIONAR", True))
-        a, b = st.columns([3, 1])
-        a.info(f"Total dos saldos selecionados: **{brl(selected_total)}**")
-        if b.button("Confirmar atualização", type="primary", use_container_width=True):
-            try:
-                new, updated = upsert_balances(save_rows, st.session_state["read_date"])
-                st.success(f"Atualização concluída: {new} novo(s) e {updated} atualizado(s).")
-                st.session_state.pop("read_rows", None)
-                st.session_state.pop("read_errors", None)
-            except Exception as e:
-                st.error(f"Erro ao gravar no Google Sheets: {e}")
-
-    for err in errors:
-        st.warning(err)
-
-def page_dashboard():
-    st.markdown("""<div class="hero"><h1>Visão Geral</h1>
-    <p>Saldo consolidado, contas e histórico de posições.</p></div>""", unsafe_allow_html=True)
-
-    if not st.session_state.get("dashboard_auth"):
-        with st.form("login"):
-            st.subheader("Acesso protegido")
-            pwd = st.text_input("Senha", type="password")
-            submitted = st.form_submit_button("Entrar", type="primary", use_container_width=True)
-            if submitted:
-                if pwd == PAINEL_PASSWORD:
-                    st.session_state["dashboard_auth"] = True
-                    st.rerun()
-                else:
-                    st.error("Senha incorreta.")
+    if "review_rows" not in st.session_state:
+        st.info("Selecione os arquivos e clique em **Ler documentos**.")
         return
 
-    top1, top2 = st.columns([5, 1])
-    with top2:
-        if st.button("Sair do painel", use_container_width=True):
-            st.session_state["dashboard_auth"] = False
+    st.subheader("Conferência")
+    review = pd.DataFrame(st.session_state["review_rows"])
+    display_columns = ["Salvar", "Empresa", "Banco", "Agência", "Conta", "Saldo identificado", "Status", "Arquivo"]
+    edited = st.data_editor(
+        review[display_columns],
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        disabled=["Empresa", "Banco", "Agência", "Conta", "Status", "Arquivo"],
+        column_config={
+            "Salvar": st.column_config.CheckboxColumn(default=False),
+            "Saldo identificado": st.column_config.NumberColumn(format="R$ %.2f", step=0.01),
+        },
+        key="review_editor",
+    )
+    total = pd.to_numeric(edited.loc[edited["Salvar"], "Saldo identificado"], errors="coerce").sum()
+    st.metric("Total dos saldos selecionados", brl(total))
+    if st.button("Confirmar atualização", type="primary", use_container_width=True):
+        selected = edited[edited["Salvar"]].copy()
+        invalid = selected["Saldo identificado"].map(parse_brl).isna() | selected["Conta"].astype(str).str.strip().eq("")
+        if selected.empty:
+            st.warning("Selecione ao menos uma linha para salvar.")
+        elif invalid.any():
+            st.error("Preencha conta e saldo em todas as linhas selecionadas.")
+        else:
+            for extra in ("Confiança", "Origem"):
+                edited[extra] = review[extra].values
+            try:
+                with st.spinner("Atualizando Google Sheets…"):
+                    inserted, updated = save_balances(edited, st.session_state.get("position_date", position_date))
+                st.success(f"Atualização concluída: {inserted} novo(s) registro(s) e {updated} atualizado(s).")
+            except Exception as exc:
+                st.error(str(exc))
+
+
+def password_gate() -> bool:
+    if st.session_state.get("dashboard_unlocked"):
+        return True
+    st.subheader("Acesso protegido")
+    with st.form("password_form"):
+        password = st.text_input("Senha", type="password")
+        sent = st.form_submit_button("Entrar", type="primary")
+    try:
+        expected = st.secrets.get("dashboard_password", "Dauto@10.10")
+    except Exception:
+        expected = "Dauto@10.10"
+    if sent:
+        if password == expected:
+            st.session_state["dashboard_unlocked"] = True
             st.rerun()
-    render_dashboard()
+        else:
+            st.error("Senha incorreta.")
+    return False
 
-def page_accounts():
-    st.markdown("""<div class="hero"><h1>Contas</h1>
-    <p>Cadastro utilizado para reconhecer automaticamente empresa, banco, agência e conta.</p></div>""", unsafe_allow_html=True)
-    df = load_accounts()
-    st.success(f"{len(df)} contas cadastradas.")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.caption("As 18 contas iniciais são criadas automaticamente. Para alterações estruturais, edite a aba CONTAS no Google Sheets.")
 
-# =========================================================
-# INICIALIZAÇÃO
-# =========================================================
-try:
-    prepare_database()
-except Exception as e:
-    st.error("Não foi possível conectar ao Google Sheets.")
-    st.code(str(e))
-    st.info(
-        "Configure a conta de serviço em .streamlit/secrets.toml e compartilhe a planilha "
-        "com o e-mail client_email dessa conta como Editor."
+def page_dashboard() -> None:
+    hero("Visão geral", "Saldos consolidados, composição por conta e evolução diária do grupo.")
+    if not password_gate():
+        return
+    try:
+        contas, saldos = load_database(st.session_state.get("db_refresh", 0))
+    except Exception as exc:
+        st.error(str(exc))
+        return
+    if saldos.empty or saldos["DATA_DT"].dropna().empty:
+        st.info("Ainda não há saldos gravados para exibir.")
+        return
+    available = sorted(saldos["DATA_DT"].dropna().dt.date.unique(), reverse=True)
+    selected_date = st.selectbox("Data da posição", available, format_func=lambda d: d.strftime("%d/%m/%Y"))
+    day = saldos[saldos["DATA_DT"].dt.date == selected_date].copy()
+    aliases = contas[["BANCO", "CONTA", "APELIDO", "ORDEM"]].copy()
+    aliases["K"] = aliases["BANCO"].map(key_part) + "|" + aliases["CONTA"].map(key_part)
+    day["K"] = day["BANCO"].map(key_part) + "|" + day["CONTA"].map(key_part)
+    day = day.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
+    day["APELIDO"] = day["APELIDO"].fillna(day["CONTA"])
+    day["GRUPO"] = day.apply(lambda r: account_group(str(r["APELIDO"]), str(r["BANCO"])), axis=1)
+    st.metric("Saldo consolidado", brl(day["SALDO"].sum()))
+
+    grouped = day.groupby("GRUPO", as_index=False)["SALDO"].sum().sort_values("GRUPO")
+    cols = st.columns(3)
+    for idx, row in grouped.reset_index(drop=True).iterrows():
+        with cols[idx % 3]:
+            st.markdown(
+                f'<div class="metric-card"><div class="label">{row["GRUPO"]}</div>'
+                f'<div class="value">{brl(row["SALDO"])}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.subheader("Detalhamento da posição")
+    detail = day[["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "SALDO"]].sort_values(["BANCO", "APELIDO"])
+    st.dataframe(
+        detail,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"SALDO": st.column_config.NumberColumn("Saldo", format="R$ %.2f")},
     )
-    st.stop()
 
-with st.sidebar:
-    st.markdown("## 💰 Saldo de Contas")
-    st.caption("Grupo Dauto")
-    st.divider()
-    page = st.radio(
-        "Navegação",
-        ["Atualizar Saldos", "Visão Geral", "Contas"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-    st.caption("PDF Itaú: leitura direta quando houver texto.")
-    st.caption("BB: OCR local no Python, sem Google Drive OCR.")
+    st.subheader("Histórico")
+    history = saldos.dropna(subset=["DATA_DT", "SALDO"]).copy()
+    daily = history.groupby("DATA_DT", as_index=False)["SALDO"].sum().sort_values("DATA_DT")
+    fig = px.line(daily, x="DATA_DT", y="SALDO", markers=True, labels={"DATA_DT": "Data", "SALDO": "Saldo consolidado"})
+    fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white", paper_bgcolor="white", yaxis_tickprefix="R$ ")
+    st.plotly_chart(fig, use_container_width=True)
 
-if page == "Atualizar Saldos":
-    page_update()
-elif page == "Visão Geral":
-    page_dashboard()
-else:
-    page_accounts()
+    options = ["Todas as contas"] + sorted(history["EMPRESA"].dropna().astype(str).unique().tolist())
+    company = st.selectbox("Histórico por empresa", options)
+    filtered = history if company == "Todas as contas" else history[history["EMPRESA"] == company]
+    pivot = filtered.pivot_table(index="DATA_DT", columns="CONTA", values="SALDO", aggfunc="sum").sort_index()
+    pivot["TOTAL"] = pivot.sum(axis=1)
+    pivot.index = pivot.index.strftime("%d/%m/%Y")
+    st.dataframe(pivot.style.format(lambda x: brl(x)), use_container_width=True)
+
+
+def page_accounts() -> None:
+    hero("Contas", "Cadastro usado para reconhecer os documentos e organizar o dashboard.")
+    try:
+        contas, _ = load_database(st.session_state.get("db_refresh", 0))
+        st.dataframe(contas.sort_values("ORDEM"), hide_index=True, use_container_width=True)
+        st.caption("O cadastro inicial é criado automaticamente sem duplicar BANCO + AGÊNCIA + CONTA.")
+    except Exception as exc:
+        st.warning(str(exc))
+        st.dataframe(local_accounts(), hide_index=True, use_container_width=True)
+        st.caption("Exibindo o cadastro padrão local enquanto o Google Sheets não está disponível.")
+
+
+def main() -> None:
+    st.set_page_config(page_title="Saldos Bancários", page_icon="🏦", layout="wide")
+    inject_css()
+    with st.sidebar:
+        st.markdown("## Dauto Financeiro")
+        st.caption("Controle diário de saldos")
+        page = st.radio("Navegação", ["Atualizar Saldos", "Visão Geral", "Contas"], label_visibility="collapsed")
+        st.divider()
+        st.caption("Dados armazenados no Google Sheets")
+    if page == "Atualizar Saldos":
+        page_update()
+    elif page == "Visão Geral":
+        page_dashboard()
+    else:
+        page_accounts()
+
+
+if __name__ == "__main__":
+    main()
