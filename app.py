@@ -114,6 +114,11 @@ def inject_css() -> None:
         .sidebar-logo-img { width:88px; height:88px; border-radius:50%; object-fit:contain; background:#fff; border:2px solid rgba(255,255,255,.78); box-shadow:0 7px 22px rgba(0,0,0,.18); padding:9px; box-sizing:border-box; }
         [data-testid="stDateInput"] > div > div { border-radius:10px; }
         .stButton button { border-radius:10px; font-weight:700; }
+        /* Contraste reforçado do menu lateral */
+        [data-testid="stSidebar"] .stRadio label p { color:#F8FAFC !important; font-weight:700 !important; opacity:1 !important; }
+        [data-testid="stSidebar"] .stRadio label { color:#F8FAFC !important; opacity:1 !important; }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color:#EAF2FA !important; opacity:1 !important; }
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4 { color:#FFFFFF !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -970,9 +975,9 @@ st.markdown(
       .stApp {{ background:{BG}; }}
       .block-container {{ max-width: 1680px; padding: 1.15rem 2rem 3rem; }}
       h1,h2,h3,h4 {{ color:{TEXT}; letter-spacing:-.025em; }}
-      [data-testid="stSidebar"] {{ background:#F8FAFC; border-right:1px solid #E2E8F0; }}
+      [data-testid="stSidebar"] {{ background:linear-gradient(180deg,#082845 0%,#0c355b 100%); border-right:1px solid rgba(255,255,255,.10); }}
       [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-      [data-testid="stSidebar"] label {{ color:#334155 !important; }}
+      [data-testid="stSidebar"] label {{ color:#F8FAFC !important; font-weight:700 !important; }}
       [data-testid="stSidebar"] input {{ color:#111827 !important; }}
       [data-testid="stSidebar"] .stFileUploader section {{ background:#FFFFFF; border-radius:14px; }}
       [data-testid="stMetric"] {{
