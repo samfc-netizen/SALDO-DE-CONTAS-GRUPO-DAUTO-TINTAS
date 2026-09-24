@@ -5,7 +5,6 @@ import hashlib
 import unicodedata
 from datetime import date, datetime
 
-import cv2
 import fitz  # PyMuPDF
 import gspread
 import numpy as np
@@ -309,14 +308,28 @@ def get_ocr():
     return RapidOCR()
 
 def preprocess_image(pil_image):
-    img = np.array(pil_image.convert("RGB"))
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    # Amplia para ajudar OCR de screenshots comprimidos
-    if gray.shape[1] < 1600:
-        scale = 1600 / gray.shape[1]
-        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-    return gray
+    """
+    Pré-processamento leve usando apenas Pillow + NumPy.
+    Evita dependência do OpenCV no Streamlit Cloud.
+    """
+    image = pil_image.convert("L")
+
+    # Amplia screenshots pequenos para melhorar o OCR.
+    if image.width < 1600:
+        scale = 1600 / image.width
+        new_size = (1600, max(1, int(image.height * scale)))
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+
+    # Autocontraste sem OpenCV.
+    arr = np.asarray(image, dtype=np.uint8)
+    low = int(np.percentile(arr, 1))
+    high = int(np.percentile(arr, 99))
+
+    if high > low:
+        arr = ((arr.astype(np.float32) - low) * (255.0 / (high - low)))
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+    return arr
 
 def ocr_image(pil_image):
     engine = get_ocr()
