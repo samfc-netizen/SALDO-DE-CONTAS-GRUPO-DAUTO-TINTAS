@@ -2,6 +2,7 @@ import io
 import re
 import json
 import hashlib
+import cv2
 import unicodedata
 from datetime import date, datetime
 
@@ -309,27 +310,22 @@ def get_ocr():
 
 def preprocess_image(pil_image):
     """
-    Pré-processamento leve usando apenas Pillow + NumPy.
-    Evita dependência do OpenCV no Streamlit Cloud.
+    Pré-processamento para OCR usando OpenCV.
+    O projeto fixa Python 3.12 via runtime.txt para garantir compatibilidade
+    com opencv-python-headless / RapidOCR no Streamlit Cloud.
     """
-    image = pil_image.convert("L")
+    img = np.array(pil_image.convert("RGB"))
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Amplia screenshots pequenos para melhorar o OCR.
-    if image.width < 1600:
-        scale = 1600 / image.width
-        new_size = (1600, max(1, int(image.height * scale)))
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    if gray.shape[1] < 1600:
+        scale = 1600 / gray.shape[1]
+        gray = cv2.resize(
+            gray, None, fx=scale, fy=scale,
+            interpolation=cv2.INTER_CUBIC
+        )
 
-    # Autocontraste sem OpenCV.
-    arr = np.asarray(image, dtype=np.uint8)
-    low = int(np.percentile(arr, 1))
-    high = int(np.percentile(arr, 99))
-
-    if high > low:
-        arr = ((arr.astype(np.float32) - low) * (255.0 / (high - low)))
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-
-    return arr
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    return gray
 
 def ocr_image(pil_image):
     engine = get_ocr()
