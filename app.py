@@ -85,6 +85,19 @@ def brl(value: Any) -> str:
     return f"{sign}R$ {raw}"
 
 
+def br_number(value: Any) -> str:
+    """Brazilian editable number without currency symbol."""
+    if value is None or pd.isna(value):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    sign = "-" if number < 0 else ""
+    raw = f"{abs(number):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return sign + raw
+
+
 def parse_brl(value: Any) -> float | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -123,6 +136,28 @@ def account_group(alias: str, bank: str) -> str:
         if a.startswith(prefix):
             return label
     return alias
+
+
+def company_group(alias: str, company: str) -> str:
+    """Stable business label used to consolidate multiple accounts at the same bank."""
+    source = plain(alias or company)
+    mappings = [
+        ("DT ", "DT TINTAS"),
+        ("DAUTO ", "DAUTO"),
+        ("ETICA ", "ÉTICA"),
+        ("UNICA ", "ÚNICA"),
+        ("MERCADO ", "MERCADO"),
+        ("V&T ", "V&T"),
+        ("VET ", "V&T"),
+    ]
+    for prefix, label in mappings:
+        if source.startswith(prefix):
+            return label
+    return company or alias
+
+
+def bank_group(bank: str) -> str:
+    return "Banco do Brasil" if "BRASIL" in plain(bank) else "Itaú" if "ITAU" in plain(bank) else bank
 
 
 @st.cache_resource(show_spinner=False)
@@ -480,10 +515,12 @@ def save_balances(rows: pd.DataFrame, position_date: date) -> tuple[int, int]:
         ]
         if key in index:
             sheet_row = index[key]
-            ws.update(range_name=f"A{sheet_row}:K{sheet_row}", values=[payload], value_input_option="USER_ENTERED")
+            # RAW preserves the JSON numeric value. USER_ENTERED can interpret the decimal
+            # point as a thousands separator when the spreadsheet locale is pt-BR.
+            ws.update(range_name=f"A{sheet_row}:K{sheet_row}", values=[payload], value_input_option="RAW")
             updated += 1
         else:
-            ws.append_row(payload, value_input_option="USER_ENTERED")
+            ws.append_row(payload, value_input_option="RAW")
             inserted += 1
     st.session_state["db_refresh"] = st.session_state.get("db_refresh", 0) + 1
     load_database.clear()
@@ -519,19 +556,24 @@ def page_update() -> None:
     st.subheader("Conferência")
     review = pd.DataFrame(st.session_state["review_rows"])
     display_columns = ["Salvar", "Empresa", "Banco", "Agência", "Conta", "Saldo identificado", "Status", "Arquivo"]
+    review_display = review[display_columns].copy()
+    review_display["Saldo identificado"] = review_display["Saldo identificado"].map(br_number)
     edited = st.data_editor(
-        review[display_columns],
+        review_display,
         hide_index=True,
         use_container_width=True,
         num_rows="fixed",
         disabled=["Empresa", "Banco", "Agência", "Conta", "Status", "Arquivo"],
         column_config={
             "Salvar": st.column_config.CheckboxColumn(default=False),
-            "Saldo identificado": st.column_config.NumberColumn(format="R$ %.2f", step=0.01),
+            "Saldo identificado": st.column_config.TextColumn(
+                "Saldo identificado",
+                help="Use o formato brasileiro, por exemplo: 106.531,91",
+            ),
         },
         key="review_editor",
     )
-    total = pd.to_numeric(edited.loc[edited["Salvar"], "Saldo identificado"], errors="coerce").sum()
+    total = edited.loc[edited["Salvar"], "Saldo identificado"].map(parse_brl).dropna().sum()
     st.metric("Total dos saldos selecionados", brl(total))
     if st.button("Confirmar atualização", type="primary", use_container_width=True):
         selected = edited[edited["Salvar"]].copy()
@@ -591,27 +633,55 @@ def page_dashboard() -> None:
     day["K"] = day["BANCO"].map(key_part) + "|" + day["CONTA"].map(key_part)
     day = day.merge(aliases[["K", "APELIDO", "ORDEM"]], on="K", how="left")
     day["APELIDO"] = day["APELIDO"].fillna(day["CONTA"])
-    day["GRUPO"] = day.apply(lambda r: account_group(str(r["APELIDO"]), str(r["BANCO"])), axis=1)
+    day["EMPRESA_GRUPO"] = day.apply(
+        lambda r: company_group(str(r["APELIDO"]), str(r["EMPRESA"])), axis=1
+    )
+    day["BANCO_GRUPO"] = day["BANCO"].map(bank_group)
     st.metric("Saldo consolidado", brl(day["SALDO"].sum()))
 
-    grouped = day.groupby("GRUPO", as_index=False)["SALDO"].sum().sort_values("GRUPO")
+    grouped = (
+        day.groupby(["EMPRESA_GRUPO", "BANCO_GRUPO"], as_index=False)
+        .agg(
+            CONTAS=("CONTA", lambda values: " • ".join(sorted({str(value) for value in values}))),
+            SALDO=("SALDO", "sum"),
+        )
+        .sort_values(["EMPRESA_GRUPO", "BANCO_GRUPO"])
+    )
     cols = st.columns(3)
     for idx, row in grouped.reset_index(drop=True).iterrows():
         with cols[idx % 3]:
             st.markdown(
-                f'<div class="metric-card"><div class="label">{row["GRUPO"]}</div>'
+                f'<div class="metric-card"><div class="label">{row["EMPRESA_GRUPO"]} • {row["BANCO_GRUPO"]}</div>'
                 f'<div class="value">{brl(row["SALDO"])}</div></div>',
                 unsafe_allow_html=True,
             )
 
-    st.subheader("Detalhamento da posição")
-    detail = day[["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "SALDO"]].sort_values(["BANCO", "APELIDO"])
+    st.subheader("Saldos por empresa e banco")
+    consolidated = grouped.rename(
+        columns={
+            "EMPRESA_GRUPO": "Empresa",
+            "BANCO_GRUPO": "Banco",
+            "CONTAS": "Contas",
+            "SALDO": "Saldo consolidado",
+        }
+    )
     st.dataframe(
-        detail,
+        consolidated,
         hide_index=True,
         use_container_width=True,
-        column_config={"SALDO": st.column_config.NumberColumn("Saldo", format="R$ %.2f")},
+        column_config={"Saldo consolidado": st.column_config.NumberColumn(format="R$ %.2f")},
     )
+
+    with st.expander("Ver contas individuais"):
+        detail = day[["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "SALDO"]].copy()
+        detail.columns = ["Empresa", "Banco", "Agência", "Conta", "Apelido", "Saldo"]
+        detail = detail.sort_values(["Empresa", "Banco", "Conta"])
+        st.dataframe(
+            detail,
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Saldo": st.column_config.NumberColumn(format="R$ %.2f")},
+        )
 
     st.subheader("Histórico")
     history = saldos.dropna(subset=["DATA_DT", "SALDO"]).copy()
