@@ -2488,15 +2488,13 @@ def main() -> None:
     if page == "Visão Geral": page_dashboard()
     elif page == "Controle de Notas e Oficinas":
         spreadsheet_url = "https://docs.google.com/spreadsheets/d/1NFHtHLaBdzukM0JltkzEExro8zZj1ktD/edit?usp=sharing"
-        st.markdown(
-            f'<meta http-equiv="refresh" content="0; url={spreadsheet_url}">',
-            unsafe_allow_html=True,
+        st.markdown("### Controle de Notas e Oficinas")
+        st.write("Abra a planilha em uma nova aba. Esta aplicação continuará aberta para você voltar normalmente.")
+        st.link_button(
+            "📄 Abrir Controle de Notas e Oficinas",
+            spreadsheet_url,
+            use_container_width=True,
         )
-        st.markdown(
-            f'<a href="{spreadsheet_url}" target="_blank">Abrir Controle de Notas e Oficinas</a>',
-            unsafe_allow_html=True,
-        )
-        st.info("A planilha será aberta em uma nova aba. Se o navegador bloquear a abertura automática, clique no link acima.")
     elif page == "Atualizar Saldos": page_update()
     elif page == "Fluxo de Caixa": page_cashflow()
     elif page == "Importar Histórico": page_history_import()
