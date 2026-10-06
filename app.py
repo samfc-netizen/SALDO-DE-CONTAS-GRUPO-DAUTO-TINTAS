@@ -2483,9 +2483,20 @@ def main() -> None:
     inject_css()
     with st.sidebar:
         st.markdown(f'<div class="sidebar-brand"><div class="brand-circles"><img class="sidebar-logo-img" src="{LOGO_UNICA}"><img class="sidebar-logo-img" src="{LOGO_DAUTO}"></div><div class="brand-title">Grupo Dauto Tintas</div><div class="brand-subtitle">Controle diário de saldos</div></div>', unsafe_allow_html=True)
-        page = st.radio("Navegação", ["Visão Geral", "Atualizar Saldos", "Fluxo de Caixa", "────────────", "Importar Histórico", "Contas"], label_visibility="collapsed")
+        page = st.radio("Navegação", ["Visão Geral", "Controle de Notas e Oficinas", "Atualizar Saldos", "Fluxo de Caixa", "────────────", "Importar Histórico", "Contas"], label_visibility="collapsed")
         st.divider(); st.caption("Dados armazenados no Google Sheets")
     if page == "Visão Geral": page_dashboard()
+    elif page == "Controle de Notas e Oficinas":
+        spreadsheet_url = "https://docs.google.com/spreadsheets/d/1NFHtHLaBdzukM0JltkzEExro8zZj1ktD/edit?usp=sharing"
+        st.markdown(
+            f'<meta http-equiv="refresh" content="0; url={spreadsheet_url}">',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<a href="{spreadsheet_url}" target="_blank">Abrir Controle de Notas e Oficinas</a>',
+            unsafe_allow_html=True,
+        )
+        st.info("A planilha será aberta em uma nova aba. Se o navegador bloquear a abertura automática, clique no link acima.")
     elif page == "Atualizar Saldos": page_update()
     elif page == "Fluxo de Caixa": page_cashflow()
     elif page == "Importar Histórico": page_history_import()
