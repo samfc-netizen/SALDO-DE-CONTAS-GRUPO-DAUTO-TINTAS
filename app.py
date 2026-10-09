@@ -928,10 +928,81 @@ def page_dashboard() -> None:
         render_monthly_software_table(monthly)
 
     with st.expander("Ver composição das contas"):
-        detail=period[["DATA_DT","EMPRESA","BANCO","AGENCIA","CONTA","APELIDO","EMPRESA_GRUPO","SALDO"]].copy()
-        detail["DATA_DT"]=detail["DATA_DT"].dt.strftime("%d/%m/%Y")
-        detail.columns=["Data","Empresa original","Banco","Agência","Conta","Apelido","Empresa consolidada","Saldo"]
-        st.dataframe(detail, hide_index=True, use_container_width=True, column_config={"Saldo":st.column_config.NumberColumn(format="R$ %.2f")})
+        st.markdown("#### Composição bancária por dia")
+        st.caption("Consulte os saldos por conta, selecione um dia e detalhe as empresas. Os filtros abaixo afetam somente esta seção.")
+        detail = period[["DATA_DT", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "EMPRESA_GRUPO", "SALDO"]].copy()
+        detail["SALDO"] = pd.to_numeric(detail["SALDO"], errors="coerce").fillna(0.0)
+        detail["CONTA_ID"] = detail["EMPRESA_GRUPO"].astype(str) + " | " + detail["BANCO"].astype(str) + " | " + detail["CONTA"].astype(str)
+        if detail.empty:
+            st.info("Não há contas lançadas no período selecionado.")
+        else:
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                empresas_sel = st.multiselect("Empresa", sorted(detail["EMPRESA_GRUPO"].dropna().unique().tolist()), key="comp_empresas")
+            df_comp = detail[detail["EMPRESA_GRUPO"].isin(empresas_sel)].copy() if empresas_sel else detail.copy()
+            with fc2:
+                bancos_sel = st.multiselect("Banco", sorted(df_comp["BANCO"].dropna().unique().tolist()), key="comp_bancos")
+            if bancos_sel:
+                df_comp = df_comp[df_comp["BANCO"].isin(bancos_sel)].copy()
+            with fc3:
+                contas_sel = st.multiselect("Conta", sorted(df_comp["CONTA_ID"].dropna().unique().tolist()), key="comp_contas")
+            if contas_sel:
+                df_comp = df_comp[df_comp["CONTA_ID"].isin(contas_sel)].copy()
+
+            if df_comp.empty:
+                st.info("Nenhuma conta encontrada para os filtros escolhidos.")
+            else:
+                matriz = df_comp.pivot_table(index="DATA_DT", columns="CONTA_ID", values="SALDO", aggfunc="sum", fill_value=0).sort_index()
+                # Mostra todos os dias úteis do período, inclusive aqueles sem lançamento.
+                matriz = matriz.reindex(business_days, fill_value=0.0)
+                matriz.index.name = "Data"
+                matriz["TOTAL DO DIA"] = matriz.sum(axis=1)
+                st.markdown("##### Saldos por dia e conta")
+                st.caption("Valores em R$ • deslize horizontalmente para consultar as demais contas • ausência de lançamento = R$ 0,00")
+                matrix_show = matriz.reset_index()
+                matrix_show["Data"] = matrix_show["Data"].dt.strftime("%d/%m/%Y")
+                currency_cols = {c: st.column_config.NumberColumn(c, format="R$ %.2f") for c in matrix_show.columns if c != "Data"}
+                st.dataframe(matrix_show, hide_index=True, use_container_width=True, height=min(440, 38 * (len(matrix_show) + 1) + 8), column_config={"Data": st.column_config.TextColumn("Data", pinned=True), **currency_cols})
+
+                valid_dates = sorted(df_comp["DATA_DT"].dt.normalize().dropna().unique(), reverse=True)
+                date_options = [pd.Timestamp(d) for d in valid_dates]
+                chosen_day = st.selectbox("Detalhar data", date_options, format_func=lambda d: d.strftime("%d/%m/%Y"), key="comp_dia")
+                day_rows = df_comp[df_comp["DATA_DT"].dt.normalize() == chosen_day.normalize()].copy()
+                day_total = float(day_rows["SALDO"].sum())
+                previous = matriz.loc[matriz.index < chosen_day, "TOTAL DO DIA"]
+                prev_total = float(previous.iloc[-1]) if not previous.empty else None
+                diff = day_total - prev_total if prev_total is not None else None
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Saldo das contas filtradas", brl(day_total))
+                m2.metric("Contas com lançamento", str(day_rows["CONTA_ID"].nunique()))
+                m3.metric("Variação ante dia útil anterior", brl(diff) if diff is not None else "—", delta=brl(diff) if diff is not None else None)
+
+                st.markdown("##### Composição por empresa")
+                by_company = day_rows.groupby("EMPRESA_GRUPO", as_index=False).agg(Saldo=("SALDO", "sum"), Contas=("CONTA_ID", "nunique")).sort_values("Saldo", ascending=False)
+                st.dataframe(by_company.rename(columns={"EMPRESA_GRUPO":"Empresa"}), hide_index=True, use_container_width=True, column_config={"Saldo":st.column_config.NumberColumn(format="R$ %.2f")})
+                company_options = sorted(day_rows["EMPRESA_GRUPO"].dropna().unique().tolist())
+                selected_company = st.selectbox("Abrir contas da empresa", company_options, key="comp_empresa_dril")
+                company_rows = day_rows[day_rows["EMPRESA_GRUPO"] == selected_company].copy()
+                company_rows = company_rows[["EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "SALDO"]].rename(columns={"EMPRESA":"Empresa original", "BANCO":"Banco", "AGENCIA":"Agência", "CONTA":"Conta", "APELIDO":"Apelido", "SALDO":"Saldo"})
+                st.dataframe(company_rows, hide_index=True, use_container_width=True, column_config={"Saldo":st.column_config.NumberColumn(format="R$ %.2f")})
+                st.caption(f"Total de {selected_company} em {chosen_day.strftime('%d/%m/%Y')}: {brl(float(company_rows['Saldo'].sum()))}")
+
+                with st.expander("Ver todos os registros detalhados"):
+                    all_rows = df_comp[["DATA_DT", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "EMPRESA_GRUPO", "SALDO"]].copy()
+                    all_rows["DATA_DT"] = all_rows["DATA_DT"].dt.strftime("%d/%m/%Y")
+                    all_rows.columns = ["Data", "Empresa original", "Banco", "Agência", "Conta", "Apelido", "Empresa consolidada", "Saldo"]
+                    st.dataframe(all_rows, hide_index=True, use_container_width=True, column_config={"Saldo":st.column_config.NumberColumn(format="R$ %.2f")})
+
+                try:
+                    export_buffer = io.BytesIO()
+                    with pd.ExcelWriter(export_buffer, engine="openpyxl") as writer:
+                        matrix_export = matriz.reset_index()
+                        matrix_export.to_excel(writer, sheet_name="Saldos por dia", index=False)
+                        export_detail = df_comp[["DATA_DT", "EMPRESA", "BANCO", "AGENCIA", "CONTA", "APELIDO", "EMPRESA_GRUPO", "SALDO"]].copy()
+                        export_detail.to_excel(writer, sheet_name="Contas detalhadas", index=False)
+                    st.download_button("⬇️ Exportar composição para Excel", data=export_buffer.getvalue(), file_name="composicao_contas_bancarias.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key="comp_exportar")
+                except ImportError:
+                    st.caption("Para exportar Excel, inclua openpyxl no requirements.txt.")
 
 def page_accounts() -> None:
     hero("Contas", "Cadastro usado para reconhecer os documentos e organizar o dashboard.")
